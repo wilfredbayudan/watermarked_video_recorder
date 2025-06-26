@@ -1,0 +1,19 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  package="com.wilfredbayudan.watermarked_video_recorder">
+  
+  <!-- Camera permission for video recording -->
+  <uses-permission android:name="android.permission.CAMERA" />
+  
+  <!-- Microphone permission for audio recording -->
+  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+  
+  <!-- Storage permissions for saving videos -->
+  <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+  <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+  
+  <!-- Feature declarations -->
+  <uses-feature android:name="android.hardware.camera" android:required="true" />
+  <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+  <uses-feature android:name="android.hardware.microphone" android:required="true" />
+  
+</manifest>
