@@ -233,4 +233,81 @@ class MethodChannelWatermarkedVideoRecorder extends WatermarkedVideoRecorderPlat
       _currentTempPath = null;
     }
   }
+
+  @override
+  Future<int?> startCameraPreview({CameraLensDirection cameraDirection = CameraLensDirection.back}) async {
+    try {
+      print('startCameraPreview: Starting preview with direction: ${cameraDirection.name}');
+
+      final result = await methodChannel.invokeMethod<int>('startCameraPreview', {'direction': cameraDirection.name});
+
+      print('startCameraPreview: Received texture ID: $result');
+      return result;
+    } catch (e) {
+      print('Error in startCameraPreview: $e');
+      return null;
+    }
+  }
+
+  @override
+  Future<void> stopCameraPreview() async {
+    try {
+      print('stopCameraPreview: Stopping preview');
+      await methodChannel.invokeMethod<void>('stopCameraPreview');
+      print('stopCameraPreview: Preview stopped successfully');
+    } catch (e) {
+      print('Error in stopCameraPreview: $e');
+    }
+  }
+
+  @override
+  Future<bool> isPreviewActive() async {
+    try {
+      final result = await methodChannel.invokeMethod<bool>('isPreviewActive');
+      return result ?? false;
+    } catch (e) {
+      print('Error in isPreviewActive: $e');
+      return false;
+    }
+  }
+
+  @override
+  Future<int?> getPreviewTextureId() async {
+    try {
+      final result = await methodChannel.invokeMethod<int>('getPreviewTextureId');
+      return result;
+    } catch (e) {
+      print('Error in getPreviewTextureId: $e');
+      return null;
+    }
+  }
+
+  @override
+  Future<int?> startPreviewWithWatermark({required String watermarkPath, CameraLensDirection cameraDirection = CameraLensDirection.back}) async {
+    try {
+      print('startPreviewWithWatermark: Starting preview with watermark');
+
+      // Handle asset copying if needed
+      String finalWatermarkPath = watermarkPath;
+      if (watermarkPath.startsWith('assets/')) {
+        print('startPreviewWithWatermark: Copying asset to temp directory');
+        finalWatermarkPath = await _copyAssetToTemp(watermarkPath);
+        _currentTempPath = finalWatermarkPath; // Track for cleanup
+        print('startPreviewWithWatermark: Asset copied to: $finalWatermarkPath');
+      }
+
+      final result = await methodChannel.invokeMethod<int>('startPreviewWithWatermark', {
+        'watermarkPath': finalWatermarkPath,
+        'direction': cameraDirection.name,
+      });
+
+      print('startPreviewWithWatermark: Received texture ID: $result');
+      return result;
+    } catch (e) {
+      print('Error in startPreviewWithWatermark: $e');
+      // Clean up on error
+      await _cleanupTempFile();
+      return null;
+    }
+  }
 }

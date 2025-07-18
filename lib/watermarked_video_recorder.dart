@@ -6,6 +6,8 @@ import 'src/camera_description.dart';
 
 // Export the camera description for public use
 export 'src/camera_description.dart';
+// Export the camera preview widget
+export 'src/camera_preview_widget.dart';
 
 class WatermarkedVideoRecorder {
   Future<String?> getPlatformVersion() {
@@ -102,5 +104,30 @@ class WatermarkedVideoRecorder {
   /// Returns the video path if successful, null otherwise
   Future<String?> stopRecordingAndSaveToGallery() {
     return WatermarkedVideoRecorderPlatform.instance.stopRecordingAndSaveToGallery();
+  }
+
+  /// Start camera preview and return the texture ID for Flutter widget
+  Future<int?> startCameraPreview({CameraLensDirection cameraDirection = CameraLensDirection.back}) {
+    return WatermarkedVideoRecorderPlatform.instance.startCameraPreview(cameraDirection: cameraDirection);
+  }
+
+  /// Stop camera preview
+  Future<void> stopCameraPreview() {
+    return WatermarkedVideoRecorderPlatform.instance.stopCameraPreview();
+  }
+
+  /// Check if camera preview is active
+  Future<bool> isPreviewActive() {
+    return WatermarkedVideoRecorderPlatform.instance.isPreviewActive();
+  }
+
+  /// Get the current texture ID for the camera preview
+  Future<int?> getPreviewTextureId() {
+    return WatermarkedVideoRecorderPlatform.instance.getPreviewTextureId();
+  }
+
+  /// Start preview with watermark overlay
+  Future<int?> startPreviewWithWatermark({required String watermarkPath, CameraLensDirection cameraDirection = CameraLensDirection.back}) {
+    return WatermarkedVideoRecorderPlatform.instance.startPreviewWithWatermark(watermarkPath: watermarkPath, cameraDirection: cameraDirection);
   }
 }

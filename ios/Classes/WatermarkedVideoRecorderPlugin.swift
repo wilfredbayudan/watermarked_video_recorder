@@ -4,6 +4,33 @@ import AVFoundation
 import Photos
 import CoreImage
 
+// MARK: - Flutter Texture Implementation
+
+class CameraPreviewTexture: NSObject, FlutterTexture {
+  private var pixelBuffer: CVPixelBuffer?
+  private let pixelBufferLock = NSLock()
+  
+  func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
+    pixelBufferLock.lock()
+    defer { pixelBufferLock.unlock() }
+    
+    guard let pixelBuffer = pixelBuffer else {
+      return nil
+    }
+    
+    return Unmanaged.passRetained(pixelBuffer)
+  }
+  
+  func updatePixelBuffer(_ buffer: CVPixelBuffer) {
+    pixelBufferLock.lock()
+    defer { pixelBufferLock.unlock() }
+    
+    pixelBuffer = buffer
+  }
+}
+
+// MARK: - Main Plugin Class
+
 public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
   private var captureSession: AVCaptureSession?
   private var videoInput: AVCaptureDeviceInput?
@@ -44,9 +71,19 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   private var isCameraInitializing = false
   private var cameraInitCompletionHandler: ((Bool) -> Void)?
 
+  // Preview-related properties
+  private var isPreviewActive = false
+  private var previewTextureId: Int64?
+  private var previewLayer: AVCaptureVideoPreviewLayer?
+  private var previewTexture: CameraPreviewTexture?
+  private var textureRegistry: FlutterTextureRegistry?
+  private var previewFrameCount = 0
+  private var totalFrameCount = 0
+
   public static func register(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterMethodChannel(name: "watermarked_video_recorder", binaryMessenger: registrar.messenger())
     let instance = WatermarkedVideoRecorderPlugin()
+    instance.textureRegistry = registrar.textures()
     registrar.addMethodCallDelegate(instance, channel: channel)
   }
 
@@ -114,6 +151,26 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         "audioOutput": audioOutput != nil
       ]
       result(state)
+    case "startCameraPreview":
+      let args = call.arguments as? [String: Any]
+      let direction = args?["direction"] as? String
+      let textureId: Int64? = if let direction = direction { startCameraPreview(direction: direction) } else { nil }
+      result(textureId)
+    case "stopCameraPreview":
+      stopCameraPreview()
+      result(nil)
+    case "isPreviewActive":
+      result(isPreviewActive)
+    case "getPreviewTextureId":
+      result(previewTextureId)
+    case "startPreviewWithWatermark":
+      let args = call.arguments as? [String: Any]
+      let watermarkPath = args?["watermarkPath"] as? String
+      let direction = args?["direction"] as? String
+      let textureId: Int64? = if let watermarkPath = watermarkPath, let direction = direction {
+        startPreviewWithWatermark(watermarkPath: watermarkPath, direction: direction)
+      } else { nil }
+      result(textureId)
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -249,12 +306,12 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
 
       // Add video output for real-time frame processing
       let videoOutput = AVCaptureVideoDataOutput()
-      videoOutput.setSampleBufferDelegate(nil, queue: DispatchQueue.global(qos: .userInitiated))
+      videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue.global(qos: .userInitiated))
       videoOutput.alwaysDiscardsLateVideoFrames = true
       if session.canAddOutput(videoOutput) {
         session.addOutput(videoOutput)
         self.videoOutput = videoOutput
-        print("Added video data output")
+        print("Added video data output with delegate")
       } else {
         print("Cannot add video data output")
         isCameraInitializing = false
@@ -394,7 +451,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       
       // Add video output for real-time frame processing
       let videoOutput = AVCaptureVideoDataOutput()
-      videoOutput.setSampleBufferDelegate(nil, queue: DispatchQueue.global(qos: .userInitiated))
+      videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue.global(qos: .userInitiated))
       videoOutput.alwaysDiscardsLateVideoFrames = true
       if session.canAddOutput(videoOutput) {
         session.addOutput(videoOutput)
@@ -505,7 +562,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       
       // Add video output for real-time frame processing
       let videoOutput = AVCaptureVideoDataOutput()
-      videoOutput.setSampleBufferDelegate(nil, queue: DispatchQueue.global(qos: .userInitiated))
+      videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue.global(qos: .userInitiated))
       videoOutput.alwaysDiscardsLateVideoFrames = true
       if session.canAddOutput(videoOutput) {
         session.addOutput(videoOutput)
@@ -1007,8 +1064,8 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate & AVCaptureAudioDataOutputSampleBufferDelegate
   
   public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-    // Only process when recording
-    guard isRecording else { return }
+    // Process video frames for preview even when not recording
+    // Only process recording-specific logic when recording
     
     // Check media type and handle accordingly
     guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
@@ -1018,8 +1075,49 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     
     let mediaType = CMFormatDescriptionGetMediaType(formatDescription)
     
+    // Debug: Log when we receive frames
+    totalFrameCount += 1
+    if totalFrameCount % 30 == 0 {
+      print("captureOutput: Received frame #\(totalFrameCount), mediaType: \(mediaType == kCMMediaType_Video ? "video" : "audio"), isPreviewActive: \(isPreviewActive), isRecording: \(isRecording)")
+    }
+    
     if mediaType == kCMMediaType_Video {
-      // Handle video frames
+      // Update preview texture if active (always do this)
+      if isPreviewActive, let previewTexture = previewTexture {
+        print("captureOutput: Preview is active, checking for pixel buffer")
+        if let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+          print("captureOutput: Got pixel buffer, updating texture")
+          
+          // Log frame dimensions for debugging
+          let width = CVPixelBufferGetWidth(pixelBuffer)
+          let height = CVPixelBufferGetHeight(pixelBuffer)
+          if previewFrameCount % 30 == 0 {
+            print("Frame dimensions: \(width)x\(height)")
+          }
+          
+          previewTexture.updatePixelBuffer(pixelBuffer)
+          // Notify Flutter to repaint the texture
+          if let textureId = previewTextureId {
+            textureRegistry?.textureFrameAvailable(textureId)
+          }
+          // Debug logging for texture updates
+          previewFrameCount += 1
+          if previewFrameCount % 30 == 0 { // Log every 30 frames
+            print("Updated preview texture with frame #\(previewFrameCount)")
+          }
+        } else {
+          print("captureOutput: Failed to get pixel buffer from sample buffer")
+        }
+      } else {
+        if totalFrameCount % 30 == 0 {
+          print("captureOutput: Preview not active - isPreviewActive: \(isPreviewActive), previewTexture: \(previewTexture != nil)")
+        }
+      }
+      
+      // Only process recording logic when actually recording
+      guard isRecording else { return }
+      
+      // Handle video frames for recording
       videoFrameCount += 1
       if videoFrameCount == 1 { // Log format info on first frame
         let dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription)
@@ -1035,6 +1133,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
           print("Started video session at time: \(startTime.seconds)")
         }
       }
+      
       if videoFrameCount % 30 == 0 { // Log every 30 frames (about once per second)
         print("Processing video frame #\(videoFrameCount)")
       }
@@ -1186,5 +1285,80 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   
   private func isFrontCamera() -> Bool {
     return currentCameraPosition == .front
+  }
+
+  // MARK: - Preview Methods
+
+  private func startCameraPreview(direction: String) -> Int64? {
+    print("startCameraPreview called with direction: \(direction)")
+    
+    // Stop any existing preview
+    stopCameraPreview()
+    
+    // Initialize camera with the specified direction
+    let success = initializeCameraWithDirection(direction)
+    if !success {
+      print("Failed to initialize camera for preview")
+      return nil
+    }
+    
+    // Create preview layer
+    guard let captureSession = captureSession else {
+      print("Capture session is nil")
+      return nil
+    }
+    
+    // Create and register texture
+    guard let textureRegistry = textureRegistry else {
+      print("Texture registry is nil")
+      return nil
+    }
+    
+    let previewTexture = CameraPreviewTexture()
+    let textureId = textureRegistry.register(previewTexture)
+    
+    // Store references
+    self.previewTexture = previewTexture
+    self.previewTextureId = textureId
+    self.isPreviewActive = true
+    
+    // Start the capture session
+    DispatchQueue.global(qos: .userInitiated).async {
+      captureSession.startRunning()
+    }
+    
+    print("Camera preview started successfully with texture ID: \(textureId)")
+    return textureId
+  }
+
+  private func startPreviewWithWatermark(watermarkPath: String, direction: String) -> Int64? {
+    print("startPreviewWithWatermark called with watermark: \(watermarkPath), direction: \(direction)")
+    
+    // Set watermark first
+    setWatermarkImage(watermarkPath)
+    
+    // Start preview (this will handle the watermark overlay)
+    return startCameraPreview(direction: direction)
+  }
+
+  private func stopCameraPreview() {
+    print("stopCameraPreview called")
+    
+    isPreviewActive = false
+    
+    // Stop the capture session
+    captureSession?.stopRunning()
+    
+    // Unregister texture
+    if let textureId = previewTextureId, let textureRegistry = textureRegistry {
+      textureRegistry.unregisterTexture(textureId)
+    }
+    
+    // Release references
+    previewTexture = nil
+    previewTextureId = nil
+    previewLayer = nil
+    
+    print("Camera preview stopped successfully")
   }
 }
