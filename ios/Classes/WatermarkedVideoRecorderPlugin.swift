@@ -162,7 +162,10 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     case "isPreviewActive":
       result(isPreviewActive)
     case "getPreviewTextureId":
-      result(previewTextureId)
+      // Return texture ID if preview is active or if recording is active (they share the same camera)
+      let textureId = isPreviewActive ? previewTextureId : (isRecording ? previewTextureId : nil)
+      print("getPreviewTextureId: previewActive=\(isPreviewActive), recording=\(isRecording), textureId=\(textureId ?? -1)")
+      result(textureId)
     case "startPreviewWithWatermark":
       let args = call.arguments as? [String: Any]
       let watermarkPath = args?["watermarkPath"] as? String
@@ -666,6 +669,8 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       print("Camera state: isCameraInitializing=\(isCameraInitializing), session=\(captureSession != nil), isRunning=\(captureSession?.isRunning ?? false)")
       return false
     }
+    
+    print("Starting video recording with existing capture session (preview active: \(isPreviewActive))")
     
     // Check if videoOutput is connected
     guard !videoOutput.connections.isEmpty else {
@@ -1292,6 +1297,12 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   private func startCameraPreview(direction: String) -> Int64? {
     print("startCameraPreview called with direction: \(direction)")
     
+    // If camera is already initialized and running, just create preview texture
+    if let captureSession = captureSession, captureSession.isRunning {
+      print("Camera already running, creating preview texture only")
+      return createPreviewTexture()
+    }
+    
     // Stop any existing preview
     stopCameraPreview()
     
@@ -1328,6 +1339,27 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     }
     
     print("Camera preview started successfully with texture ID: \(textureId)")
+    return textureId
+  }
+  
+  private func createPreviewTexture() -> Int64? {
+    print("createPreviewTexture called")
+    
+    // Create and register texture
+    guard let textureRegistry = textureRegistry else {
+      print("Texture registry is nil")
+      return nil
+    }
+    
+    let previewTexture = CameraPreviewTexture()
+    let textureId = textureRegistry.register(previewTexture)
+    
+    // Store references
+    self.previewTexture = previewTexture
+    self.previewTextureId = textureId
+    self.isPreviewActive = true
+    
+    print("Preview texture created with ID: \(textureId)")
     return textureId
   }
 
