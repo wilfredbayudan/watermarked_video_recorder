@@ -19,7 +19,7 @@ class CameraPreviewWidget extends StatefulWidget {
   final Widget? errorWidget;
 
   /// Callback when camera preview starts successfully
-  final VoidCallback? onPreviewStarted;
+  final void Function(int textureId)? onPreviewStarted;
 
   /// Callback when camera preview stops
   final VoidCallback? onPreviewStopped;
@@ -29,6 +29,9 @@ class CameraPreviewWidget extends StatefulWidget {
 
   /// How the preview should fit within the container
   final BoxFit fit;
+
+  /// Optional: Use an existing texture ID instead of starting a new preview
+  final int? textureId;
 
   const CameraPreviewWidget({
     super.key,
@@ -40,6 +43,7 @@ class CameraPreviewWidget extends StatefulWidget {
     this.onPreviewStopped,
     this.onPreviewError,
     this.fit = BoxFit.contain,
+    this.textureId,
   });
 
   @override
@@ -58,12 +62,26 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
   @override
   void initState() {
     super.initState();
-    _initializePreview();
+    if (widget.textureId != null) {
+      // Use provided textureId, skip initialization
+      setState(() {
+        _textureId = widget.textureId;
+        _isPreviewActive = true;
+        _isLoading = false;
+      });
+      if (_textureId != null) {
+        widget.onPreviewStarted?.call(_textureId!);
+      }
+    } else {
+      _initializePreview();
+    }
   }
 
   @override
   void dispose() {
-    _stopPreview();
+    if (widget.textureId == null) {
+      _stopPreview();
+    }
     super.dispose();
   }
 
@@ -93,7 +111,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
           _isPreviewActive = true;
           _isLoading = false;
         });
-        widget.onPreviewStarted?.call();
+        widget.onPreviewStarted?.call(_textureId!);
       } else {
         throw Exception('Failed to get texture ID from camera preview');
       }
