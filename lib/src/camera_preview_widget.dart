@@ -156,16 +156,20 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
   }
 
   Widget _buildCameraPreview() {
-    // The native plugin should now handle orientation, so we just need to display the texture
+    // The native plugin handles orientation, but we need to mirror front camera for preview only
     // Since we set videoOrientation to portrait, the dimensions should be 1080x1920
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
-      child: FittedBox(
-        fit: widget.fit,
-        child: SizedBox(
-          width: 1080, // Portrait width (was 1920 for landscape)
-          height: 1920, // Portrait height (was 1080 for landscape)
-          child: Texture(textureId: _textureId!),
+      child: Transform.scale(
+        scaleX: widget.cameraDirection == CameraLensDirection.front ? -1.0 : 1.0, // Mirror front camera for preview
+        scaleY: 1.0, // Keep vertical scale normal
+        child: FittedBox(
+          fit: widget.fit,
+          child: SizedBox(
+            width: 1080, // Portrait width (was 1920 for landscape)
+            height: 1920, // Portrait height (was 1080 for landscape)
+            child: Texture(textureId: _textureId!),
+          ),
         ),
       ),
     );

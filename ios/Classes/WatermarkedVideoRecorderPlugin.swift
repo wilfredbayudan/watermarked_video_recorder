@@ -342,8 +342,8 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
           
           // For front camera, also set mirroring
           if currentCameraPosition == .front {
-            connection.isVideoMirrored = true
-            print("Enabled video mirroring for front camera")
+            connection.isVideoMirrored = false // No mirroring - handle in Flutter
+            print("Disabled video mirroring for front camera (will handle in Flutter)")
           } else {
             connection.isVideoMirrored = false
             print("Disabled video mirroring for back camera")
@@ -519,8 +519,8 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
           
           // For front camera, also set mirroring
           if currentCameraPosition == .front {
-            connection.isVideoMirrored = true
-            print("Enabled video mirroring for front camera")
+            connection.isVideoMirrored = false // No mirroring - handle in Flutter
+            print("Disabled video mirroring for front camera (will handle in Flutter)")
           } else {
             connection.isVideoMirrored = false
             print("Disabled video mirroring for back camera")
@@ -662,8 +662,8 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
           
           // For front camera, also set mirroring
           if currentCameraPosition == .front {
-            connection.isVideoMirrored = true
-            print("Enabled video mirroring for front camera")
+            connection.isVideoMirrored = false // No mirroring - handle in Flutter
+            print("Disabled video mirroring for front camera (will handle in Flutter)")
           } else {
             connection.isVideoMirrored = false
             print("Disabled video mirroring for back camera")
@@ -956,7 +956,15 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     // Use 25% of the video width for the watermark
     let scale: CGFloat = 0.25
     let watermarkWidth = videoSize.width * scale
-    let watermarkHeight = watermarkWidth * (watermarkSize.height / watermarkSize.width)
+    
+    // Get the original watermark image dimensions for aspect ratio
+    guard let watermarkImage = watermarkImage else {
+      return CGSize(width: watermarkWidth, height: watermarkWidth)
+    }
+    
+    let originalWatermarkSize = watermarkImage.extent.size
+    let watermarkHeight = watermarkWidth * (originalWatermarkSize.height / originalWatermarkSize.width)
+    
     print("Watermark size calculated: \(watermarkWidth)x\(watermarkHeight) for video size: \(videoSize.width)x\(videoSize.height)")
     return CGSize(width: watermarkWidth, height: watermarkHeight)
   }
@@ -967,13 +975,9 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     let x: CGFloat
     let y: CGFloat
     
-    if currentCameraPosition == .front {
-      x = videoSize.width - margin
-      y = margin + watermarkSize.height
-    } else {
-      x = videoSize.width - margin
-      y = videoSize.height - watermarkSize.height - margin
-    }
+    // For portrait orientation, position in bottom-right
+    x = videoSize.width - watermarkSize.width - margin
+    y = margin
     
     print("Watermark position: bottom-right at \(x),\(y)")
     return CGPoint(x: x, y: y)
@@ -1012,25 +1016,23 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     let watermarkPos = calculateWatermarkPosition(for: videoSize, watermarkSize: watermarkSize)
     
     // Scale watermark to desired size
-    let scaleX = watermarkSize.width / watermarkSize.width
-    let scaleY = watermarkSize.height / watermarkSize.height
+    // Get the original watermark image dimensions
+    let originalWatermarkSize = watermarkImage.extent.size
+    let scaleX = watermarkSize.width / originalWatermarkSize.width
+    let scaleY = watermarkSize.height / originalWatermarkSize.height
     var scaledWatermark = watermarkImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+    
+    print("Watermark scaling: original=\(originalWatermarkSize), target=\(watermarkSize), scale=\(scaleX)x\(scaleY)")
     
     // Apply correct rotation and flip for each camera type
     let isFrontCamera = currentCameraPosition == .front
     
     print("Applying watermark transformations: front=\(isFrontCamera)")
     
-    if isFrontCamera {
-      // Front camera: rotate 90° left (counterclockwise) and flip horizontally
-      scaledWatermark = scaledWatermark.transformed(by: CGAffineTransform(rotationAngle: -.pi / 2))
-      scaledWatermark = scaledWatermark.transformed(by: CGAffineTransform(scaleX: -1, y: 1))
-      print("Applied 90° left rotation + horizontal flip for front camera")
-    } else {
-      // Back camera: rotate 90° right (clockwise)
-      scaledWatermark = scaledWatermark.transformed(by: CGAffineTransform(rotationAngle: .pi / 2))
-      print("Applied 90° right rotation for back camera")
-    }
+    // Since we're now using connection.videoOrientation = .portrait,
+    // the video frames are already in portrait orientation
+    // No mirroring needed for recording - recordings should never be mirrored
+    print("No watermark transforms needed - connection handles video orientation")
     
     // Position watermark
     let positionedWatermark = scaledWatermark.transformed(by: CGAffineTransform(translationX: watermarkPos.x, y: watermarkPos.y))
@@ -1098,25 +1100,13 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       let transformOrientation = getVideoOrientationHint()
       print("setupAVAssetWriter: Applying orientation transform: \(transformOrientation) degrees")
       
-      // Start with horizontal flip for front camera
-      var transform = CGAffineTransform.identity
+      // Since we're now setting videoOrientation on the connection,
+      // we don't need any additional transforms for recording
+      let transform = CGAffineTransform.identity
       
-      if currentCameraPosition == .front {
-        // For front camera, flip horizontally to mirror the image
-        transform = CGAffineTransform(scaleX: -1, y: 1)
-        print("setupAVAssetWriter: Applied front camera horizontal flip")
-      }
-      
-      // Now add rotation to fix the landscape issue
-      if transformOrientation == 270 {
-        // Front camera in portrait - rotate 90 degrees clockwise
-        transform = transform.rotated(by: .pi / 2)
-        print("setupAVAssetWriter: Applied 90 degree rotation for front camera portrait")
-      } else if transformOrientation == 90 {
-        // Back camera in portrait - rotate 90 degrees clockwise
-        transform = transform.rotated(by: .pi / 2)
-        print("setupAVAssetWriter: Applied 90 degree rotation for back camera portrait")
-      }
+      // Note: Front camera mirroring is handled by connection.isVideoMirrored for preview only
+      // Recordings should not be mirrored (like most camera apps)
+      print("setupAVAssetWriter: No transforms needed - connection handles orientation")
       
       // Apply the transform to the video writer input
       videoWriterInput?.transform = transform
