@@ -310,4 +310,16 @@ class MethodChannelWatermarkedVideoRecorder extends WatermarkedVideoRecorderPlat
       return null;
     }
   }
+
+  @override
+  Future<bool> pauseRecording() async {
+    final result = await methodChannel.invokeMethod<bool>('pauseRecording');
+    return result ?? false;
+  }
+
+  @override
+  Future<bool> resumeRecording() async {
+    final result = await methodChannel.invokeMethod<bool>('resumeRecording');
+    return result ?? false;
+  }
 }

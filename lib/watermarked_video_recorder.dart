@@ -130,4 +130,14 @@ class WatermarkedVideoRecorder {
   Future<int?> startPreviewWithWatermark({required String watermarkPath, CameraLensDirection cameraDirection = CameraLensDirection.back}) {
     return WatermarkedVideoRecorderPlatform.instance.startPreviewWithWatermark(watermarkPath: watermarkPath, cameraDirection: cameraDirection);
   }
+
+  /// Pause the current video recording (segment-based)
+  Future<bool> pauseRecording() {
+    return WatermarkedVideoRecorderPlatform.instance.pauseRecording();
+  }
+
+  /// Resume video recording after a pause (segment-based)
+  Future<bool> resumeRecording() {
+    return WatermarkedVideoRecorderPlatform.instance.resumeRecording();
+  }
 }

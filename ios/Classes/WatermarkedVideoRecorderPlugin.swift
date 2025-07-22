@@ -86,6 +86,10 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   // Add property to track session start
   private var hasStartedSession = false
 
+  // Add segmented recording support
+  private var segmentPaths: [String] = []
+  private var isPaused = false
+
   public static func register(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterMethodChannel(name: "watermarked_video_recorder", binaryMessenger: registrar.messenger())
     let instance = WatermarkedVideoRecorderPlugin()
@@ -128,9 +132,18 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     case "startVideoRecording":
       let success = startVideoRecording()
       result(success)
+    case "pauseRecording":
+      let success = pauseRecording()
+      result(success)
+    case "resumeRecording":
+      let success = resumeRecording()
+      result(success)
     case "stopVideoRecording":
       stopVideoRecording { videoPath in
-        result(videoPath)
+        // After stopping, merge segments if needed
+        self.mergeSegmentsIfNeeded { mergedPath in
+          result(mergedPath)
+        }
       }
     case "isRecording":
       result(isRecording)
@@ -1499,5 +1512,98 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     previewLayer = nil
     
     print("Camera preview stopped successfully")
+  }
+
+  // MARK: - Segmented Recording Methods
+  private func pauseRecording() -> Bool {
+    guard isRecording else { return false }
+    isPaused = true
+    // Stop current segment
+    if let videoWriter = videoWriter {
+      videoWriterInput?.markAsFinished()
+      audioWriterInput?.markAsFinished()
+      let currentPath = currentVideoPath
+      videoWriter.finishWriting { [weak self] in
+        if let path = currentPath {
+          self?.segmentPaths.append(path)
+        }
+      }
+    }
+    // Clean up writer
+    videoWriter = nil
+    videoWriterInput = nil
+    audioWriterInput = nil
+    pixelBufferAdaptor = nil
+    isRecording = false
+    currentVideoPath = nil
+    pendingVideoURL = nil
+    return true
+  }
+
+  private func resumeRecording() -> Bool {
+    guard !isRecording else { return false }
+    isPaused = false
+    // Start a new segment
+    return startVideoRecording()
+  }
+
+  private func mergeSegmentsIfNeeded(completion: @escaping (String?) -> Void) {
+    if segmentPaths.isEmpty {
+      // No segments, just return the last video path
+      completion(pendingVideoPath)
+      return
+    }
+    // If only one segment, return it
+    if segmentPaths.count == 1 {
+      completion(segmentPaths.first)
+      segmentPaths.removeAll()
+      return
+    }
+    // Merge segments
+    let composition = AVMutableComposition()
+    guard let firstAsset = AVAsset(url: URL(fileURLWithPath: segmentPaths[0])) as? AVAsset else {
+      completion(nil)
+      return
+    }
+    guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+          let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+      completion(nil)
+      return
+    }
+    var currentTime = CMTime.zero
+    for path in segmentPaths {
+      let asset = AVAsset(url: URL(fileURLWithPath: path))
+      if let assetVideoTrack = asset.tracks(withMediaType: .video).first {
+        try? videoTrack.insertTimeRange(CMTimeRangeMake(start: .zero, duration: asset.duration), of: assetVideoTrack, at: currentTime)
+      }
+      if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
+        try? audioTrack.insertTimeRange(CMTimeRangeMake(start: .zero, duration: asset.duration), of: assetAudioTrack, at: currentTime)
+      }
+      currentTime = CMTimeAdd(currentTime, asset.duration)
+    }
+    // Export merged file
+    let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("merged_\(Int(Date().timeIntervalSince1970)).mov")
+    if FileManager.default.fileExists(atPath: outputURL.path) {
+      try? FileManager.default.removeItem(at: outputURL)
+    }
+    guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+      completion(nil)
+      return
+    }
+    exportSession.outputURL = outputURL
+    exportSession.outputFileType = .mov
+    exportSession.shouldOptimizeForNetworkUse = true
+    exportSession.exportAsynchronously {
+      if exportSession.status == .completed {
+        completion(outputURL.path)
+      } else {
+        completion(nil)
+      }
+      // Clean up segments
+      for path in self.segmentPaths {
+        try? FileManager.default.removeItem(atPath: path)
+      }
+      self.segmentPaths.removeAll()
+    }
   }
 }

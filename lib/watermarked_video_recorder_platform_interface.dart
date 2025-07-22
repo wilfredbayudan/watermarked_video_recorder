@@ -144,4 +144,7 @@ abstract class WatermarkedVideoRecorderPlatform extends PlatformInterface {
   Future<int?> startPreviewWithWatermark({required String watermarkPath, CameraLensDirection cameraDirection = CameraLensDirection.back}) {
     throw UnimplementedError('startPreviewWithWatermark() has not been implemented.');
   }
+
+  Future<bool> pauseRecording();
+  Future<bool> resumeRecording();
 }
