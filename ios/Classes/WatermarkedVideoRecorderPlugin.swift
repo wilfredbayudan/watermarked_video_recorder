@@ -3,6 +3,7 @@ import UIKit
 import AVFoundation
 import Photos
 import CoreImage
+import VideoToolbox
 
 // MARK: - Flutter Texture Implementation
 
@@ -82,6 +83,9 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   private var previewFrameCount = 0
   private var totalFrameCount = 0
 
+  // Add property to track session start
+  private var hasStartedSession = false
+
   public static func register(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterMethodChannel(name: "watermarked_video_recorder", binaryMessenger: registrar.messenger())
     let instance = WatermarkedVideoRecorderPlugin()
@@ -125,8 +129,9 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       let success = startVideoRecording()
       result(success)
     case "stopVideoRecording":
-      let videoPath = stopVideoRecording()
-      result(videoPath)
+      stopVideoRecording { videoPath in
+        result(videoPath)
+      }
     case "isRecording":
       result(isRecording)
     case "saveVideoToGallery":
@@ -711,6 +716,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   }
 
   private func disposeCamera() {
+    print("[DEBUG] disposeCamera called. isRecording: \(isRecording), videoWriter: \(videoWriter != nil)")
     print("Camera disposal started")
     
     // Stop recording if active
@@ -799,34 +805,42 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     audioOutput?.setSampleBufferDelegate(self, queue: DispatchQueue.global(qos: .userInitiated))
     
     isRecording = true
+    hasStartedSession = false // Reset session flag
+    if videoWriter == nil {
+      print("[ERROR] startVideoRecording: videoWriter is nil after setup!")
+    } else {
+      print("[DEBUG] startVideoRecording: videoWriter is set and ready.")
+    }
     print("Started video recording to: \(videoURL.path)")
     return true
   }
 
-  private func stopVideoRecording() -> String? {
+  // Change stopVideoRecording to async with completion handler
+  private func stopVideoRecording(completion: @escaping (String?) -> Void) {
+    hasStartedSession = false // Reset session flag
+    if videoWriter == nil {
+      print("[ERROR] stopVideoRecording: videoWriter is nil at the start!")
+    }
     guard let videoOutput = videoOutput, isRecording else {
       print("Cannot stop recording: videoOutput is nil or not recording")
-      return nil
+      completion(nil)
+      return
     }
-    
     // Store the current path before stopping
     let videoPath = currentVideoPath
     pendingVideoPath = videoPath
-    
     // Stop recording by clearing delegates
     videoOutput.setSampleBufferDelegate(nil, queue: nil)
     audioOutput?.setSampleBufferDelegate(nil, queue: nil)
-    
     isRecording = false
     currentVideoPath = nil
     pendingVideoURL = nil
     isSettingUpWriter = false
-    
     // Finish writing the file
     if let videoWriter = videoWriter {
       videoWriterInput?.markAsFinished()
       audioWriterInput?.markAsFinished()
-      
+      print("Waiting for AVAssetWriter to finish writing...")
       videoWriter.finishWriting { [weak self] in
         DispatchQueue.main.async {
           if videoWriter.status == .completed {
@@ -842,23 +856,27 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
                 } catch {
                   print("Error getting file attributes: \(error)")
                 }
+                completion(path)
+                return
+              } else {
+                print("Video file does not exist after finishWriting")
               }
             }
           } else {
             print("Video recording failed: \(videoWriter.error?.localizedDescription ?? "Unknown error")")
           }
+          completion(nil)
         }
       }
+    } else {
+      print("No videoWriter to finish writing")
+      completion(nil)
     }
-    
     // Clean up
     videoWriter = nil
     videoWriterInput = nil
     audioWriterInput = nil
     pixelBufferAdaptor = nil
-    
-    print("Stopped video recording")
-    return videoPath
   }
 
   private func saveVideoToGallery(_ videoPath: String) -> Bool {
@@ -1053,65 +1071,111 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     return true
   }
   
-  private func setupAVAssetWriter(with videoFormat: CMFormatDescription) {
-    guard let videoURL = pendingVideoURL else { 
-      print("setupAVAssetWriter: No pending video URL")
-      return 
+  // Helper: Copy pixel buffer and apply watermark, return new CMSampleBuffer
+  private func copyAndApplyWatermark(_ sampleBuffer: CMSampleBuffer) -> CMSampleBuffer? {
+    guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
+    let width = CVPixelBufferGetWidth(pixelBuffer)
+    let height = CVPixelBufferGetHeight(pixelBuffer)
+    var newPixelBuffer: CVPixelBuffer?
+    let attrs = [
+      kCVPixelBufferCGImageCompatibilityKey: true,
+      kCVPixelBufferCGBitmapContextCompatibilityKey: true
+    ] as CFDictionary
+    let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height, CVPixelBufferGetPixelFormatType(pixelBuffer), attrs, &newPixelBuffer)
+    guard status == kCVReturnSuccess, let outBuffer = newPixelBuffer else {
+      print("[ERROR] copyAndApplyWatermark: Failed to create new pixel buffer")
+      return nil
     }
-    
-    if isSettingUpWriter {
-      print("setupAVAssetWriter: Already setting up writer, skipping...")
+    // Copy pixel data
+    CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+    CVPixelBufferLockBaseAddress(outBuffer, [])
+    for plane in 0..<CVPixelBufferGetPlaneCount(pixelBuffer) {
+      let src = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, plane)
+      let dst = CVPixelBufferGetBaseAddressOfPlane(outBuffer, plane)
+      let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, plane)
+      let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, plane)
+      memcpy(dst, src, height * bytesPerRow)
+    }
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
+    // Apply watermark to the copy
+    let ciImage = CIImage(cvPixelBuffer: outBuffer)
+    guard let watermarkImage = watermarkImage, let ciContext = ciContext else {
+      CVPixelBufferUnlockBaseAddress(outBuffer, [])
+      return nil
+    }
+    let videoSize = CGSize(width: width, height: height)
+    let watermarkSize = calculateWatermarkSize(for: videoSize)
+    let watermarkPos = calculateWatermarkPosition(for: videoSize, watermarkSize: watermarkSize)
+    let originalWatermarkSize = watermarkImage.extent.size
+    let scaleX = watermarkSize.width / originalWatermarkSize.width
+    let scaleY = watermarkSize.height / originalWatermarkSize.height
+    let scaledWatermark = watermarkImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+    let positionedWatermark = scaledWatermark.transformed(by: CGAffineTransform(translationX: watermarkPos.x, y: watermarkPos.y))
+    let compositeFilter = CIFilter(name: "CISourceOverCompositing")
+    compositeFilter?.setValue(ciImage, forKey: kCIInputBackgroundImageKey)
+    compositeFilter?.setValue(positionedWatermark, forKey: kCIInputImageKey)
+    guard let outputImage = compositeFilter?.outputImage else {
+      CVPixelBufferUnlockBaseAddress(outBuffer, [])
+      return nil
+    }
+    ciContext.render(outputImage, to: outBuffer)
+    CVPixelBufferUnlockBaseAddress(outBuffer, [])
+    // Create new CMSampleBuffer
+    var newSampleBuffer: CMSampleBuffer?
+    var timingInfo = CMSampleTimingInfo()
+    let status2 = CMSampleBufferGetSampleTimingInfo(sampleBuffer, at: 0, timingInfoOut: &timingInfo)
+    if status2 != noErr {
+      print("[ERROR] copyAndApplyWatermark: Failed to get timing info")
+      return nil
+    }
+    var formatDesc: CMFormatDescription?
+    CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: outBuffer, formatDescriptionOut: &formatDesc)
+    if let formatDesc = formatDesc {
+      CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: outBuffer, formatDescription: formatDesc, sampleTiming: &timingInfo, sampleBufferOut: &newSampleBuffer)
+    }
+    return newSampleBuffer
+  }
+  
+  private func setupAVAssetWriter(with videoFormat: CMFormatDescription) {
+    print("[DEBUG] Entered setupAVAssetWriter")
+    print("[DEBUG] pendingVideoURL: \(pendingVideoURL?.path ?? "nil")")
+    guard let videoURL = pendingVideoURL else {
+      print("[ERROR] setupAVAssetWriter: pendingVideoURL is nil!")
       return
     }
-    
+    if isSettingUpWriter {
+      print("[ERROR] setupAVAssetWriter: Already setting up writer, skipping...")
+      return
+    }
     isSettingUpWriter = true
-    print("setupAVAssetWriter: Starting setup...")
-    print("setupAVAssetWriter: Video URL: \(videoURL.path)")
-    
+    print("[DEBUG] setupAVAssetWriter: Starting setup...")
+    print("[DEBUG] setupAVAssetWriter: Video URL: \(videoURL.path)")
+    let dimensions = CMVideoFormatDescriptionGetDimensions(videoFormat)
+    print("[DEBUG] setupAVAssetWriter: Video dimensions: \(dimensions.width)x\(dimensions.height)")
+    if dimensions.width == 0 || dimensions.height == 0 {
+      print("[ERROR] setupAVAssetWriter: Invalid video dimensions: \(dimensions.width)x\(dimensions.height)")
+      isSettingUpWriter = false
+      return
+    }
     do {
       videoWriter = try AVAssetWriter(url: videoURL, fileType: .mp4)
-      
-      // Get video dimensions from the format
-      let dimensions = CMVideoFormatDescriptionGetDimensions(videoFormat)
-      print("setupAVAssetWriter: Video dimensions: \(dimensions.width)x\(dimensions.height)")
-      
-      // Get more format info
-      let pixelFormat = CMFormatDescriptionGetMediaSubType(videoFormat)
-      print("setupAVAssetWriter: Pixel format: \(pixelFormat)")
-      
-      // Get orientation hint based on device orientation and camera position
-      let orientationHint = getVideoOrientationHint()
-      print("setupAVAssetWriter: Orientation hint: \(orientationHint) degrees")
-      
-      // Use more complete video settings that match the input format
+      print("[DEBUG] setupAVAssetWriter: AVAssetWriter created at: \(videoURL.path)")
       let videoSettings: [String: Any] = [
         AVVideoCodecKey: AVVideoCodecType.h264,
         AVVideoWidthKey: dimensions.width,
         AVVideoHeightKey: dimensions.height
-        // Removed compression properties to use defaults
       ]
-      
-      print("setupAVAssetWriter: Video settings: \(videoSettings)")
-      
       videoWriterInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
       videoWriterInput?.expectsMediaDataInRealTime = true
-      
-      // Apply orientation transform to fix video orientation
-      let transformOrientation = getVideoOrientationHint()
-      print("setupAVAssetWriter: Applying orientation transform: \(transformOrientation) degrees")
-      
-      // Since we're now setting videoOrientation on the connection,
-      // we don't need any additional transforms for recording
-      let transform = CGAffineTransform.identity
-      
-      // Note: Front camera mirroring is handled by connection.isVideoMirrored for preview only
-      // Recordings should not be mirrored (like most camera apps)
-      print("setupAVAssetWriter: No transforms needed - connection handles orientation")
-      
-      // Apply the transform to the video writer input
-      videoWriterInput?.transform = transform
-      print("setupAVAssetWriter: Applied final transform: \(transform)")
-      
+      // Pixel buffer adaptor for compatibility
+      pixelBufferAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+        assetWriterInput: videoWriterInput!,
+        sourcePixelBufferAttributes: [
+          kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
+          kCVPixelBufferWidthKey as String: dimensions.width,
+          kCVPixelBufferHeightKey as String: dimensions.height
+        ]
+      )
       if let videoWriterInput = videoWriterInput, videoWriter!.canAdd(videoWriterInput) {
         videoWriter!.add(videoWriterInput)
         print("setupAVAssetWriter: Added video writer input successfully")
@@ -1120,7 +1184,6 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         isSettingUpWriter = false
         return
       }
-      
       // Configure audio writer input
       let audioSettings: [String: Any] = [
         AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -1128,10 +1191,8 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         AVNumberOfChannelsKey: 2,
         AVEncoderBitRateKey: 128000
       ]
-      
       audioWriterInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
       audioWriterInput?.expectsMediaDataInRealTime = true
-      
       if let audioWriterInput = audioWriterInput, videoWriter!.canAdd(audioWriterInput) {
         videoWriter!.add(audioWriterInput)
         print("setupAVAssetWriter: Added audio writer input successfully")
@@ -1140,18 +1201,62 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         isSettingUpWriter = false
         return
       }
-      
-      // Start writing but don't start session yet - we'll do that with the first frame
       videoWriter!.startWriting()
       print("setupAVAssetWriter: Started AVAssetWriter successfully (session will start with first frame)")
-      
-      // Reset the flag after successful setup
       isSettingUpWriter = false
-      
     } catch {
-      print("setupAVAssetWriter: Failed to set up AVAssetWriter: \(error)")
+      print("[ERROR] setupAVAssetWriter: Failed to set up AVAssetWriter: \(error)")
       isSettingUpWriter = false
     }
+  }
+
+  // Helper: Render watermark into a pixel buffer from the adaptor pool
+  private func renderWatermarkToPixelBuffer(from sampleBuffer: CMSampleBuffer) -> CVPixelBuffer? {
+    guard let adaptor = pixelBufferAdaptor else { return nil }
+    var newPixelBuffer: CVPixelBuffer?
+    let status = CVPixelBufferPoolCreatePixelBuffer(nil, adaptor.pixelBufferPool!, &newPixelBuffer)
+    guard status == kCVReturnSuccess, let outBuffer = newPixelBuffer else {
+      print("[ERROR] renderWatermarkToPixelBuffer: Failed to get buffer from pool")
+      return nil
+    }
+    // Copy original image to new buffer
+    guard let srcBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
+    CVPixelBufferLockBaseAddress(srcBuffer, .readOnly)
+    CVPixelBufferLockBaseAddress(outBuffer, [])
+    for plane in 0..<CVPixelBufferGetPlaneCount(srcBuffer) {
+      let src = CVPixelBufferGetBaseAddressOfPlane(srcBuffer, plane)
+      let dst = CVPixelBufferGetBaseAddressOfPlane(outBuffer, plane)
+      let height = CVPixelBufferGetHeightOfPlane(srcBuffer, plane)
+      let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(srcBuffer, plane)
+      memcpy(dst, src, height * bytesPerRow)
+    }
+    CVPixelBufferUnlockBaseAddress(srcBuffer, .readOnly)
+    // Apply watermark
+    let width = CVPixelBufferGetWidth(outBuffer)
+    let height = CVPixelBufferGetHeight(outBuffer)
+    let ciImage = CIImage(cvPixelBuffer: outBuffer)
+    guard let watermarkImage = watermarkImage, let ciContext = ciContext else {
+      CVPixelBufferUnlockBaseAddress(outBuffer, [])
+      return outBuffer
+    }
+    let videoSize = CGSize(width: width, height: height)
+    let watermarkSize = calculateWatermarkSize(for: videoSize)
+    let watermarkPos = calculateWatermarkPosition(for: videoSize, watermarkSize: watermarkSize)
+    let originalWatermarkSize = watermarkImage.extent.size
+    let scaleX = watermarkSize.width / originalWatermarkSize.width
+    let scaleY = watermarkSize.height / originalWatermarkSize.height
+    let scaledWatermark = watermarkImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+    let positionedWatermark = scaledWatermark.transformed(by: CGAffineTransform(translationX: watermarkPos.x, y: watermarkPos.y))
+    let compositeFilter = CIFilter(name: "CISourceOverCompositing")
+    compositeFilter?.setValue(ciImage, forKey: kCIInputBackgroundImageKey)
+    compositeFilter?.setValue(positionedWatermark, forKey: kCIInputImageKey)
+    guard let outputImage = compositeFilter?.outputImage else {
+      CVPixelBufferUnlockBaseAddress(outBuffer, [])
+      return outBuffer
+    }
+    ciContext.render(outputImage, to: outBuffer)
+    CVPixelBufferUnlockBaseAddress(outBuffer, [])
+    return outBuffer
   }
   
   // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate & AVCaptureAudioDataOutputSampleBufferDelegate
@@ -1175,161 +1280,71 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     }
     
     if mediaType == kCMMediaType_Video {
-      // Update preview texture if active (always do this)
+      // PREVIEW: Always use the original pixelBuffer for preview, never apply watermark
       if isPreviewActive, let previewTexture = previewTexture {
-        print("captureOutput: Preview is active, checking for pixel buffer")
         if let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
-          print("captureOutput: Got pixel buffer, updating texture")
-          
-          // Log frame dimensions for debugging
-          let width = CVPixelBufferGetWidth(pixelBuffer)
-          let height = CVPixelBufferGetHeight(pixelBuffer)
-          if previewFrameCount % 30 == 0 {
-            print("Frame dimensions: \(width)x\(height)")
-          }
-          
-          // Apply orientation correction for preview (same logic as recording)
-          let orientationHint = getVideoOrientationHint()
-          print("Preview orientation hint: \(orientationHint) degrees")
-          
-          // For now, just pass the original buffer
-          // TODO: Apply orientation correction to the pixel buffer
-          previewTexture.updatePixelBuffer(pixelBuffer)
-          
-          // Notify Flutter to repaint the texture
+          previewTexture.updatePixelBuffer(pixelBuffer);
           if let textureId = previewTextureId {
-            textureRegistry?.textureFrameAvailable(textureId)
+            textureRegistry?.textureFrameAvailable(textureId);
           }
-          // Debug logging for texture updates
-          previewFrameCount += 1
-          if previewFrameCount % 30 == 0 { // Log every 30 frames
-            print("Updated preview texture with frame #\(previewFrameCount)")
-          }
-        } else {
-          print("captureOutput: Failed to get pixel buffer from sample buffer")
-        }
-      } else {
-        if totalFrameCount % 30 == 0 {
-          print("captureOutput: Preview not active - isPreviewActive: \(isPreviewActive), previewTexture: \(previewTexture != nil)")
+          previewFrameCount += 1;
         }
       }
-      
-      // Only process recording logic when actually recording
-      guard isRecording else { return }
-      
-      // Handle video frames for recording
-      videoFrameCount += 1
-      if videoFrameCount == 1 { // Log format info on first frame
+      // RECORDING: Only apply watermark to frames written to file
+      guard isRecording else { return };
+      videoFrameCount += 1;
+      // Only set up AVAssetWriter when we have a valid frame
+      if videoWriter == nil {
         let dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription)
-        print("Video format: \(dimensions.width)x\(dimensions.height)")
-        
-        // Set up AVAssetWriter on first frame with correct format
-        setupAVAssetWriter(with: formatDescription)
-        
-        // Start the session with the first frame's timestamp
-        if let videoWriter = videoWriter, videoWriter.status == .writing {
-          let startTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-          videoWriter.startSession(atSourceTime: startTime)
-          print("Started video session at time: \(startTime.seconds)")
+        if dimensions.width > 0 && dimensions.height > 0 {
+          print("[DEBUG] captureOutput: Setting up AVAssetWriter with dimensions: \(dimensions.width)x\(dimensions.height)")
+          setupAVAssetWriter(with: formatDescription)
+        } else {
+          print("[DEBUG] captureOutput: Skipping setupAVAssetWriter due to invalid dimensions: \(dimensions.width)x\(dimensions.height)")
+          return
         }
       }
-      
-      if videoFrameCount % 30 == 0 { // Log every 30 frames (about once per second)
-        print("Processing video frame #\(videoFrameCount)")
+      // Ensure AVAssetWriter session is started before appending
+      if let videoWriter = videoWriter, videoWriter.status == .writing, !hasStartedSession {
+        let startTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        videoWriter.startSession(atSourceTime: startTime)
+        hasStartedSession = true
+        print("[DEBUG] AVAssetWriter session started at: \(startTime.seconds)")
       }
-      
-      // Check if writer is in correct state
-      if let videoWriter = videoWriter, videoWriter.status != .writing {
-        if videoFrameCount % 30 == 0 {
-          print("Writer not in writing state: \(videoWriter.status.rawValue)")
-        }
-        return
-      }
-      
-      // Write video frame to file (simplified approach)
       if let videoWriterInput = videoWriterInput, 
          videoWriterInput.isReadyForMoreMediaData, 
          videoWriter != nil {
-        
-        // Debug sample buffer properties on first frame
-        if videoFrameCount == 1 {
-          let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer)
-          let dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription!)
-          let pixelFormat = CMFormatDescriptionGetMediaSubType(formatDescription!)
-          print("Sample buffer properties - Width: \(dimensions.width), Height: \(dimensions.height), Format: \(pixelFormat)")
-        }
-        
-        // Apply watermark overlay if watermark is available
-        let processedSampleBuffer: CMSampleBuffer
+        let processedPixelBuffer: CVPixelBuffer?
         if watermarkImage != nil {
-          // Try to apply watermark by modifying the pixel buffer in place
-          if applyWatermarkToExistingFrame(sampleBuffer) {
-            // Use the original sample buffer (modified in place)
-            processedSampleBuffer = sampleBuffer
-            if videoFrameCount % 30 == 0 {
-              print("Successfully applied watermark to frame #\(videoFrameCount)")
-            }
-          } else {
-            print("Failed to apply watermark to frame #\(videoFrameCount), using original frame")
-            processedSampleBuffer = sampleBuffer
-          }
+          processedPixelBuffer = renderWatermarkToPixelBuffer(from: sampleBuffer)
         } else {
-          processedSampleBuffer = sampleBuffer
+          processedPixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
         }
-        
-        // Append the processed sample buffer
-        let success = videoWriterInput.append(processedSampleBuffer)
+        // Log pixel buffer format
+        if let pb = processedPixelBuffer {
+          let pixelFormat = CVPixelBufferGetPixelFormatType(pb)
+          print("[DEBUG] Pixel buffer format: \(pixelFormat)")
+        }
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let success = pixelBufferAdaptor?.append(processedPixelBuffer!, withPresentationTime: presentationTime) ?? false
         if !success {
-          print("Failed to append video frame #\(videoFrameCount)")
+          print("Failed to append video frame #\(videoFrameCount)");
           if let writer = videoWriter {
             print("  - Writer status: \(writer.status.rawValue)")
             print("  - Writer error: \(writer.error?.localizedDescription ?? "none")")
-            
-            // If writer failed, stop trying to append frames
-            if writer.status == .failed {
-              print("AVAssetWriter failed, stopping frame processing")
-              return
-            }
-          }
-        } else if videoFrameCount % 30 == 0 {
-          print("Successfully appended video frame #\(videoFrameCount)")
-        }
-      } else {
-        if videoFrameCount % 30 == 0 { // Log every 30 frames
-          print("Video writer not ready for frame #\(videoFrameCount)")
-          print("  - videoWriterInput exists: \(videoWriterInput != nil)")
-          print("  - isReadyForMoreMediaData: \(videoWriterInput?.isReadyForMoreMediaData ?? false)")
-          print("  - videoWriter exists: \(videoWriter != nil)")
-          if let writer = videoWriter {
-            print("  - videoWriter status: \(writer.status.rawValue)")
           }
         }
       }
-      
     } else if mediaType == kCMMediaType_Audio {
-      // Handle audio samples
-      audioSampleCount += 1
-      if audioSampleCount == 1 { // Log audio info on first sample
-        print("Audio format: \(formatDescription)")
-      }
-      if audioSampleCount % 100 == 0 { // Log every 100 audio samples
-        print("Processing audio sample #\(audioSampleCount)")
-      }
-      
-      // Write audio sample to file (only if writer is ready)
+      audioSampleCount += 1;
       if let audioWriterInput = audioWriterInput, audioWriterInput.isReadyForMoreMediaData, videoWriter != nil {
-        let success = audioWriterInput.append(sampleBuffer)
+        let success = audioWriterInput.append(sampleBuffer);
         if !success {
-          print("Failed to append audio sample #\(audioSampleCount)")
-        } else if audioSampleCount % 100 == 0 {
-          print("Successfully appended audio sample #\(audioSampleCount)")
-        }
-      } else {
-        if audioSampleCount % 100 == 0 { // Log every 100 samples
-          print("Audio writer not ready for sample #\(audioSampleCount)")
-          print("  - audioWriterInput exists: \(audioWriterInput != nil)")
-          print("  - isReadyForMoreMediaData: \(audioWriterInput?.isReadyForMoreMediaData ?? false)")
-          print("  - videoWriter exists: \(videoWriter != nil)")
+          print("Failed to append audio sample #\(audioSampleCount)");
+          if let writer = videoWriter {
+            print("  - Writer status: \(writer.status.rawValue)")
+            print("  - Writer error: \(writer.error?.localizedDescription ?? "none")")
+          }
         }
       }
     }
