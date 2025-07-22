@@ -27,6 +27,9 @@ class CameraPreviewWidget extends StatefulWidget {
   /// Callback when camera preview fails
   final Function(String error)? onPreviewError;
 
+  /// How the preview should fit within the container
+  final BoxFit fit;
+
   const CameraPreviewWidget({
     super.key,
     this.cameraDirection = CameraLensDirection.back,
@@ -36,6 +39,7 @@ class CameraPreviewWidget extends StatefulWidget {
     this.onPreviewStarted,
     this.onPreviewStopped,
     this.onPreviewError,
+    this.fit = BoxFit.contain,
   });
 
   @override
@@ -152,23 +156,16 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
   }
 
   Widget _buildCameraPreview() {
-    // Camera frames are typically landscape (e.g., 1920x1080)
-    // But we're displaying in portrait, so we need to rotate
+    // The native plugin should now handle orientation, so we just need to display the texture
+    // Since we set videoOrientation to portrait, the dimensions should be 1080x1920
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
-      child: Transform.rotate(
-        angle: -1.5708, // -90 degrees in radians (-π/2) to fix upside down
-        child: Transform.scale(
-          scaleX: widget.cameraDirection == CameraLensDirection.front ? -1.0 : 1.0, // Mirror front camera horizontally
-          scaleY: 1.0, // Keep vertical scale normal
-          child: FittedBox(
-            fit: BoxFit.contain, // Show full frame without cropping
-            child: SizedBox(
-              width: 1920, // Camera width
-              height: 1080, // Camera height
-              child: Texture(textureId: _textureId!),
-            ),
-          ),
+      child: FittedBox(
+        fit: widget.fit,
+        child: SizedBox(
+          width: 1080, // Portrait width (was 1920 for landscape)
+          height: 1920, // Portrait height (was 1080 for landscape)
+          child: Texture(textureId: _textureId!),
         ),
       ),
     );

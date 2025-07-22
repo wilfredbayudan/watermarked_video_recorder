@@ -25,6 +25,8 @@ class CameraPreviewTexture: NSObject, FlutterTexture {
     pixelBufferLock.lock()
     defer { pixelBufferLock.unlock() }
     
+    // For now, just use the original buffer
+    // The orientation correction will be handled by the main plugin class
     pixelBuffer = buffer
   }
 }
@@ -315,6 +317,38 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         session.addOutput(videoOutput)
         self.videoOutput = videoOutput
         print("Added video data output with delegate")
+        
+        // Configure video orientation for preview
+        if let connection = videoOutput.connection(with: .video) {
+          let orientationHint = getVideoOrientationHint()
+          print("Setting video connection orientation to: \(orientationHint) degrees")
+          
+          // Apply the same orientation logic as recording
+          if orientationHint == 270 {
+            // Front camera in portrait - rotate 90 degrees clockwise
+            connection.videoOrientation = .portrait
+            print("Set video connection to portrait for front camera")
+          } else if orientationHint == 90 {
+            // Back camera in portrait - rotate 90 degrees clockwise
+            connection.videoOrientation = .portrait
+            print("Set video connection to portrait for back camera")
+          } else if orientationHint == 180 {
+            connection.videoOrientation = .landscapeRight
+            print("Set video connection to landscapeRight")
+          } else {
+            connection.videoOrientation = .landscapeLeft
+            print("Set video connection to landscapeLeft")
+          }
+          
+          // For front camera, also set mirroring
+          if currentCameraPosition == .front {
+            connection.isVideoMirrored = true
+            print("Enabled video mirroring for front camera")
+          } else {
+            connection.isVideoMirrored = false
+            print("Disabled video mirroring for back camera")
+          }
+        }
       } else {
         print("Cannot add video data output")
         isCameraInitializing = false
@@ -460,6 +494,38 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         session.addOutput(videoOutput)
         self.videoOutput = videoOutput
         print("Added video data output")
+        
+        // Configure video orientation for preview
+        if let connection = videoOutput.connection(with: .video) {
+          let orientationHint = getVideoOrientationHint()
+          print("Setting video connection orientation to: \(orientationHint) degrees")
+          
+          // Apply the same orientation logic as recording
+          if orientationHint == 270 {
+            // Front camera in portrait - rotate 90 degrees clockwise
+            connection.videoOrientation = .portrait
+            print("Set video connection to portrait for front camera")
+          } else if orientationHint == 90 {
+            // Back camera in portrait - rotate 90 degrees clockwise
+            connection.videoOrientation = .portrait
+            print("Set video connection to portrait for back camera")
+          } else if orientationHint == 180 {
+            connection.videoOrientation = .landscapeRight
+            print("Set video connection to landscapeRight")
+          } else {
+            connection.videoOrientation = .landscapeLeft
+            print("Set video connection to landscapeLeft")
+          }
+          
+          // For front camera, also set mirroring
+          if currentCameraPosition == .front {
+            connection.isVideoMirrored = true
+            print("Enabled video mirroring for front camera")
+          } else {
+            connection.isVideoMirrored = false
+            print("Disabled video mirroring for back camera")
+          }
+        }
       } else {
         print("Cannot add video data output")
         isCameraInitializing = false
@@ -571,6 +637,38 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         session.addOutput(videoOutput)
         self.videoOutput = videoOutput
         print("Added video data output")
+        
+        // Configure video orientation for preview
+        if let connection = videoOutput.connection(with: .video) {
+          let orientationHint = getVideoOrientationHint()
+          print("Setting video connection orientation to: \(orientationHint) degrees")
+          
+          // Apply the same orientation logic as recording
+          if orientationHint == 270 {
+            // Front camera in portrait - rotate 90 degrees clockwise
+            connection.videoOrientation = .portrait
+            print("Set video connection to portrait for front camera")
+          } else if orientationHint == 90 {
+            // Back camera in portrait - rotate 90 degrees clockwise
+            connection.videoOrientation = .portrait
+            print("Set video connection to portrait for back camera")
+          } else if orientationHint == 180 {
+            connection.videoOrientation = .landscapeRight
+            print("Set video connection to landscapeRight")
+          } else {
+            connection.videoOrientation = .landscapeLeft
+            print("Set video connection to landscapeLeft")
+          }
+          
+          // For front camera, also set mirroring
+          if currentCameraPosition == .front {
+            connection.isVideoMirrored = true
+            print("Enabled video mirroring for front camera")
+          } else {
+            connection.isVideoMirrored = false
+            print("Disabled video mirroring for back camera")
+          }
+        }
       } else {
         print("Cannot add video data output")
         isCameraInitializing = false
@@ -1100,7 +1198,14 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
             print("Frame dimensions: \(width)x\(height)")
           }
           
+          // Apply orientation correction for preview (same logic as recording)
+          let orientationHint = getVideoOrientationHint()
+          print("Preview orientation hint: \(orientationHint) degrees")
+          
+          // For now, just pass the original buffer
+          // TODO: Apply orientation correction to the pixel buffer
           previewTexture.updatePixelBuffer(pixelBuffer)
+          
           // Notify Flutter to repaint the texture
           if let textureId = previewTextureId {
             textureRegistry?.textureFrameAvailable(textureId)
@@ -1266,8 +1371,6 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     let deviceRotation = getDeviceRotation()
     let isFrontCamera = currentCameraPosition == .front
     
-    print("getVideoOrientationHint: Device rotation: \(deviceRotation)°, Front camera: \(isFrontCamera)")
-    
     // Calculate orientation hint based on device rotation and camera type
     // This matches the Android implementation logic
     let orientationHint: Int
@@ -1284,7 +1387,6 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       orientationHint = isFrontCamera ? 270 : 90 // Default to portrait
     }
     
-    print("getVideoOrientationHint: Calculated orientation hint: \(orientationHint)°")
     return orientationHint
   }
   

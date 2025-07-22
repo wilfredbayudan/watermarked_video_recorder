@@ -1087,6 +1087,22 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       val surfaceTexture = SurfaceTexture(textureId)
       surfaceTexture.setDefaultBufferSize(1920, 1080) // Set default size
       
+      // Apply the same orientation logic that works for recording
+      val orientation = getDeviceOrientation()
+      Log.d(TAG, "Setting preview orientation to: $orientation degrees")
+      
+      // Apply the orientation transform to the SurfaceTexture
+      val matrix = android.graphics.Matrix()
+      matrix.postRotate(orientation.toFloat())
+      
+      // For front camera, also apply horizontal flip (same as recording)
+      if (isFrontCamera()) {
+        matrix.postScale(-1f, 1f)
+        Log.d(TAG, "Applied horizontal flip for front camera preview")
+      }
+      
+      surfaceTexture.setTransform(matrix)
+      
       // Create Surface from SurfaceTexture
       val surface = Surface(surfaceTexture)
       
@@ -1095,7 +1111,7 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       previewSurfaceTexture = surfaceTexture
       previewSurface = surface
       
-      Log.d(TAG, "Created preview texture with ID: $textureId")
+      Log.d(TAG, "Created preview texture with ID: $textureId and orientation: $orientation")
       textureId
     } catch (e: Exception) {
       Log.e(TAG, "Error creating preview texture", e)
