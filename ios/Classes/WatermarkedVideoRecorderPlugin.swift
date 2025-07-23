@@ -174,7 +174,8 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         "isRecording": isRecording,
         "isInitialized": isInitialized,
         "videoOutput": videoOutput != nil,
-        "audioOutput": audioOutput != nil
+        "audioOutput": audioOutput != nil,
+        "currentCameraPosition": currentCameraPosition == .front ? "front" : "back"
       ]
       result(state)
     case "startCameraPreview":

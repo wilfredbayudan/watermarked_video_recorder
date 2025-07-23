@@ -1,7 +1,6 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import '../watermarked_video_recorder.dart';
-import 'camera_description.dart';
 
 /// A Flutter widget that displays a real-time camera preview
 /// with optional watermark overlay using the watermarked_video_recorder plugin
@@ -174,12 +173,16 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
   }
 
   Widget _buildCameraPreview() {
-    // The native plugin handles orientation, but we need to mirror front camera for preview only
+    // Platform-specific mirroring behavior:
+    // - iOS: Native code sets isVideoMirrored = false, so we need to mirror front camera in Flutter
+    // - Android: Native code doesn't handle mirroring, so system default applies (usually already mirrored)
+    final shouldMirror = Platform.isIOS && widget.cameraDirection == CameraLensDirection.front;
+
     // Since we set videoOrientation to portrait, the dimensions should be 1080x1920
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
       child: Transform.scale(
-        scaleX: widget.cameraDirection == CameraLensDirection.front ? -1.0 : 1.0, // Mirror front camera for preview
+        scaleX: shouldMirror ? -1.0 : 1.0, // Only mirror front camera on iOS
         scaleY: 1.0, // Keep vertical scale normal
         child: FittedBox(
           fit: widget.fit,

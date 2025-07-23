@@ -147,8 +147,8 @@ class MethodChannelWatermarkedVideoRecorder extends WatermarkedVideoRecorderPlat
       print('startRecordingWithWatermark: Setting watermark image');
       await setWatermarkImage(finalWatermarkPath);
 
-      // Initialize camera
-      print('startRecordingWithWatermark: Initializing camera with direction: ${cameraDirection.name}');
+      // Always ensure camera is initialized with the correct direction for recording
+      print('startRecordingWithWatermark: Ensuring camera is initialized with direction: ${cameraDirection.name}');
       final initSuccess = await initializeCameraWithDirection(cameraDirection);
       if (!initSuccess) {
         print('Failed to initialize camera with direction: ${cameraDirection.name}');
@@ -158,8 +158,8 @@ class MethodChannelWatermarkedVideoRecorder extends WatermarkedVideoRecorderPlat
 
       // Check if camera is ready before starting recording
       print('startRecordingWithWatermark: Checking if camera is ready');
-      final isReady = await isCameraReady();
-      if (!isReady) {
+      final isReadyForRecording = await isCameraReady();
+      if (!isReadyForRecording) {
         print('Camera not ready after initialization, waiting...');
         // Wait a bit more for camera to be ready
         await Future.delayed(const Duration(milliseconds: 500));

@@ -228,6 +228,7 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
           "isRecording" to isRecording,
           "isPaused" to isPaused,
           "cameraId" to cameraId,
+          "currentCameraDirection" to (if (cameraId == "1") "front" else "back"),
           "textureRegistry" to (textureRegistry != null),
           "isPreviewActive" to isPreviewActive,
           "previewTextureEntry" to (previewTextureEntry != null)
@@ -662,18 +663,32 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         return true
       }
       
-      val previewTextureEntry = textureRegistry!!.createSurfaceTexture()
-      val previewSurfaceTexture = previewTextureEntry.surfaceTexture()
-      previewSurfaceTexture.setDefaultBufferSize(1920, 1080)
-      val previewSurface = Surface(previewSurfaceTexture)
+      // Reuse existing preview texture if available, otherwise create new one
+      val previewTextureEntry: TextureRegistry.SurfaceTextureEntry
+      val previewSurfaceTexture: SurfaceTexture
+      val previewSurface: Surface
       
-      // Store preview texture for Flutter UI
-      this.previewTextureEntry = previewTextureEntry
-      this.previewSurfaceTexture = previewSurfaceTexture
-      this.previewSurface = previewSurface
-      isPreviewActive = true
-      
-      Log.d(TAG, "Created preview texture with ID: ${previewTextureEntry.id()}")
+      if (this.previewTextureEntry != null && this.previewSurfaceTexture != null && this.previewSurface != null) {
+        // Reuse existing preview texture
+        previewTextureEntry = this.previewTextureEntry!!
+        previewSurfaceTexture = this.previewSurfaceTexture!!
+        previewSurface = this.previewSurface!!
+        Log.d(TAG, "Reusing existing preview texture with ID: ${previewTextureEntry.id()}")
+      } else {
+        // Create new preview texture
+        previewTextureEntry = textureRegistry!!.createSurfaceTexture()
+        previewSurfaceTexture = previewTextureEntry.surfaceTexture()
+        previewSurfaceTexture.setDefaultBufferSize(1920, 1080)
+        previewSurface = Surface(previewSurfaceTexture)
+        
+        // Store preview texture for Flutter UI
+        this.previewTextureEntry = previewTextureEntry
+        this.previewSurfaceTexture = previewSurfaceTexture
+        this.previewSurface = previewSurface
+        isPreviewActive = true
+        
+        Log.d(TAG, "Created new preview texture with ID: ${previewTextureEntry.id()}")
+      }
       
       // Create recording capture session with BOTH WatermarkRenderer input surface AND preview surface
       cameraDevice!!.createCaptureSession(
