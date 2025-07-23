@@ -40,6 +40,9 @@ class WatermarkRenderer(
     private var watermarkBitmap: Bitmap? = null
     private var isRunning = false
     private var frameCount = 0
+    private var renderThread: Thread? = null
+    private var renderHandler: android.os.Handler? = null
+    private var renderLooper: android.os.Looper? = null
 
     // Vertex shader for both camera and watermark
     private val vertexShaderCode = """
@@ -187,69 +190,124 @@ class WatermarkRenderer(
     private var oesTextureHandle = 0
     private var tex2DHandle = 0
 
+    private val initializationComplete = java.util.concurrent.CountDownLatch(1)
+    private var initializationError: Exception? = null
+
     fun start() {
         Log.d(TAG, "Starting OpenGL renderer...")
         isRunning = true
-        setupEGL()
-        setupSurfaceTexture()
-        loadWatermarkTexture()
-        cameraProgram = createProgram(vertexShaderCode, cameraFragmentShaderCode)
-        watermarkProgram = createProgram(vertexShaderCode, watermarkFragmentShaderCode)
-        oesTextureHandle = GLES20.glGetUniformLocation(cameraProgram, "sTexture")
-        tex2DHandle = GLES20.glGetUniformLocation(watermarkProgram, "sTexture")
-        Log.d(TAG, "OpenGL renderer started successfully")
+        
+        // Create dedicated render thread
+        renderThread = Thread {
+            android.os.Looper.prepare()
+            renderLooper = android.os.Looper.myLooper()
+            renderHandler = android.os.Handler(renderLooper!!)
+            
+            try {
+                setupEGL()
+                setupSurfaceTexture()
+                loadWatermarkTexture()
+                cameraProgram = createProgram(vertexShaderCode, cameraFragmentShaderCode)
+                watermarkProgram = createProgram(vertexShaderCode, watermarkFragmentShaderCode)
+                oesTextureHandle = GLES20.glGetUniformLocation(cameraProgram, "sTexture")
+                tex2DHandle = GLES20.glGetUniformLocation(watermarkProgram, "sTexture")
+                Log.d(TAG, "OpenGL renderer started successfully on render thread")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to initialize OpenGL renderer", e)
+                isRunning = false
+                initializationError = e
+            } finally {
+                initializationComplete.countDown()
+            }
+            
+            android.os.Looper.loop()
+        }
+        renderThread?.start()
     }
 
     fun stop() {
         Log.d(TAG, "Stopping OpenGL renderer...")
         isRunning = false
         
-        // Remove frame listener before releasing SurfaceTexture
-        surfaceTexture?.setOnFrameAvailableListener(null)
-        
-        // Release resources in correct order
-        surfaceTexture?.release()
-        cameraSurface?.release()
-        watermarkBitmap?.recycle()
-        
-        // Delete OpenGL textures
-        if (watermarkTextureId != 0) {
-            GLES20.glDeleteTextures(1, intArrayOf(watermarkTextureId), 0)
-            watermarkTextureId = 0
-        }
-        if (cameraTextureId != 0) {
-            GLES20.glDeleteTextures(1, intArrayOf(cameraTextureId), 0)
-            cameraTextureId = 0
-        }
-        
-        // Clean up EGL resources
-        eglSurface?.let { surface ->
-            eglDisplay?.let { display ->
-                EGL14.eglDestroySurface(display, surface)
+        // Stop render thread
+        renderHandler?.post {
+            try {
+                // Remove frame listener before releasing SurfaceTexture
+                surfaceTexture?.setOnFrameAvailableListener(null)
+                
+                // Release resources in correct order
+                surfaceTexture?.release()
+                cameraSurface?.release()
+                watermarkBitmap?.recycle()
+                
+                // Delete OpenGL textures
+                if (watermarkTextureId != 0) {
+                    GLES20.glDeleteTextures(1, intArrayOf(watermarkTextureId), 0)
+                    watermarkTextureId = 0
+                }
+                if (cameraTextureId != 0) {
+                    GLES20.glDeleteTextures(1, intArrayOf(cameraTextureId), 0)
+                    cameraTextureId = 0
+                }
+                
+                // Clean up EGL resources
+                eglSurface?.let { surface ->
+                    eglDisplay?.let { display ->
+                        EGL14.eglDestroySurface(display, surface)
+                    }
+                }
+                eglContext?.let { context ->
+                    eglDisplay?.let { display ->
+                        EGL14.eglDestroyContext(display, context)
+                    }
+                }
+                eglDisplay?.let { display ->
+                    EGL14.eglTerminate(display)
+                }
+                
+                // Clear references
+                eglSurface = null
+                eglContext = null
+                eglDisplay = null
+                surfaceTexture = null
+                cameraSurface = null
+                watermarkBitmap = null
+                
+                Log.d(TAG, "OpenGL renderer stopped successfully")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during renderer cleanup", e)
             }
         }
-        eglContext?.let { context ->
-            eglDisplay?.let { display ->
-                EGL14.eglDestroyContext(display, context)
-            }
-        }
-        eglDisplay?.let { display ->
-            EGL14.eglTerminate(display)
-        }
         
-        // Clear references
-        eglSurface = null
-        eglContext = null
-        eglDisplay = null
-        surfaceTexture = null
-        cameraSurface = null
-        watermarkBitmap = null
+        // Quit the render thread
+        renderLooper?.quit()
+        renderThread?.join(1000) // Wait up to 1 second for thread to finish
+        renderThread = null
+        renderHandler = null
+        renderLooper = null
         
-        Log.d(TAG, "OpenGL renderer stopped successfully")
+        // Reset initialization state
+        initializationError = null
     }
 
     fun getInputSurface(): Surface? {
-        return cameraSurface
+        // Wait for initialization to complete
+        try {
+            if (!initializationComplete.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                Log.e(TAG, "Timeout waiting for WatermarkRenderer initialization")
+                return null
+            }
+            
+            if (initializationError != null) {
+                Log.e(TAG, "WatermarkRenderer initialization failed", initializationError)
+                return null
+            }
+            
+            return cameraSurface
+        } catch (e: InterruptedException) {
+            Log.e(TAG, "Interrupted while waiting for WatermarkRenderer initialization", e)
+            return null
+        }
     }
 
     private fun setupEGL() {
@@ -364,14 +422,25 @@ class WatermarkRenderer(
     }
 
     override fun onFrameAvailable(surfaceTexture: SurfaceTexture?) {
-        if (!isRunning) {
-            Log.w(TAG, "Frame available but renderer is not running")
+        if (!isRunning || renderHandler == null) {
+            Log.w(TAG, "Frame available but renderer is not running or handler is null")
             return
         }
         
         frameCount++
         if (frameCount % 30 == 0) { // Log every 30 frames (about once per second)
-            Log.d(TAG, "Processing frame #$frameCount")
+            Log.d(TAG, "Scheduling frame #$frameCount for rendering")
+        }
+        
+        // Post rendering work to the render thread
+        renderHandler?.post {
+            renderFrame(surfaceTexture)
+        }
+    }
+    
+    private fun renderFrame(surfaceTexture: SurfaceTexture?) {
+        if (!isRunning) {
+            return
         }
         
         try {
@@ -434,7 +503,7 @@ class WatermarkRenderer(
                 Log.d(TAG, "Frame #$frameCount rendered successfully")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error in onFrameAvailable for frame #$frameCount", e)
+            Log.e(TAG, "Error in renderFrame for frame #$frameCount", e)
         }
     }
 
