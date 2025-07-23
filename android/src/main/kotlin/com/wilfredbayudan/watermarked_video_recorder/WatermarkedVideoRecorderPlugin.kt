@@ -28,10 +28,12 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
+import io.flutter.view.TextureRegistry
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import android.graphics.SurfaceTexture
 
 /** WatermarkedVideoRecorderPlugin */
 class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, ActivityAware {
@@ -42,6 +44,7 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
   private lateinit var channel : MethodChannel
   private lateinit var context: Context
   private var activityBinding: ActivityPluginBinding? = null
+  private var textureRegistry: TextureRegistry? = null
 
   // Camera2 API components
   private var cameraManager: CameraManager? = null
@@ -55,6 +58,13 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
   private var mediaRecorder: MediaRecorder? = null
   private var isRecording = false
   private var currentVideoPath: String? = null
+
+  // Camera preview components
+  private var previewSurfaceTexture: SurfaceTexture? = null
+  private var previewSurface: Surface? = null
+  private var isPreviewActive = false
+  private var previewCaptureSession: CameraCaptureSession? = null
+  private var previewTextureEntry: TextureRegistry.SurfaceTextureEntry? = null
 
   // Placeholder for watermark image path
   private var watermarkImagePath: String? = null
@@ -82,6 +92,7 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
     channel = MethodChannel(flutterPluginBinding.binaryMessenger, "watermarked_video_recorder")
     channel.setMethodCallHandler(this)
     context = flutterPluginBinding.applicationContext
+    textureRegistry = flutterPluginBinding.textureRegistry
   }
 
   override fun onMethodCall(call: MethodCall, result: Result) {
@@ -170,6 +181,43 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
           "cameraId" to cameraId
         )
         result.success(state)
+      }
+      "startCameraPreview" -> {
+        val direction = call.argument<String>("direction")
+        val textureId = if (direction != null) startCameraPreview(direction) else startCameraPreview("back")
+        result.success(textureId)
+      }
+      "stopCameraPreview" -> {
+        stopCameraPreview()
+        result.success(null)
+      }
+      "isPreviewActive" -> {
+        result.success(isPreviewActive)
+      }
+      "getPreviewTextureId" -> {
+        result.success(if (isPreviewActive && previewTextureEntry != null) previewTextureEntry!!.id().toInt() else null)
+      }
+      "startPreviewWithWatermark" -> {
+        val watermarkPath = call.argument<String>("watermarkPath")
+        val direction = call.argument<String>("direction")
+        val textureId = if (watermarkPath != null && direction != null) {
+          startPreviewWithWatermark(watermarkPath, direction)
+        } else {
+          startCameraPreview(direction ?: "back")
+        }
+        result.success(textureId)
+      }
+      "pauseRecording" -> {
+        val success = pauseRecording()
+        result.success(success)
+      }
+      "resumeRecording" -> {
+        val success = resumeRecording()
+        result.success(success)
+      }
+      "capturePhotoWithWatermark" -> {
+        val photoPath = capturePhotoWithWatermark()
+        result.success(photoPath)
       }
       else -> {
         result.notImplemented()
@@ -385,6 +433,11 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         stopVideoRecording()
       }
       
+      // Stop preview if active
+      if (isPreviewActive) {
+        stopCameraPreview()
+      }
+      
       // Close camera capture session
       cameraCaptureSession?.close()
       cameraCaptureSession = null
@@ -402,6 +455,9 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       // Stop and clean up WatermarkRenderer
       watermarkRenderer?.stop()
       watermarkRenderer = null
+      
+      // Clean up texture registry reference
+      textureRegistry = null
       
       Log.d(TAG, "Camera disposal completed")
     } catch (e: Exception) {
@@ -969,5 +1025,174 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
     watermarkImagePath = path
     Log.d(TAG, "Set watermark image path: $path")
     // TODO: Implement actual watermark loading and OpenGL pipeline
+  }
+
+  // Camera Preview Methods
+  private fun startCameraPreview(direction: String): Int? {
+    return try {
+      Log.d(TAG, "Starting camera preview with direction: $direction")
+      
+      // Check if texture registry is available
+      if (textureRegistry == null) {
+        Log.e(TAG, "Texture registry is null")
+        return null
+      }
+      
+      // Start background thread if not already started
+      if (backgroundHandler == null) {
+        startBackgroundThread()
+      }
+      
+      // Initialize camera if not already done
+      if (cameraDevice == null) {
+        val initSuccess = initializeCameraWithDirection(direction)
+        if (!initSuccess) {
+          Log.e(TAG, "Failed to initialize camera for preview")
+          return null
+        }
+        
+        // Wait for camera to be ready
+        var waitCount = 0
+        while (cameraDevice == null && waitCount < 30) {
+          Thread.sleep(100)
+          waitCount++
+        }
+        if (cameraDevice == null) {
+          Log.e(TAG, "Camera initialization timeout for preview")
+          return null
+        }
+      }
+
+      // Create texture entry using Flutter's texture registry
+      previewTextureEntry = textureRegistry!!.createSurfaceTexture()
+      previewSurfaceTexture = previewTextureEntry!!.surfaceTexture()
+      previewSurfaceTexture?.setDefaultBufferSize(1920, 1080)
+      previewSurface = Surface(previewSurfaceTexture)
+      
+      // Create preview capture session
+      cameraDevice!!.createCaptureSession(
+        listOf(previewSurface!!),
+        object : CameraCaptureSession.StateCallback() {
+          override fun onConfigured(session: CameraCaptureSession) {
+            Log.d(TAG, "Preview capture session configured successfully")
+            previewCaptureSession = session
+            
+            val captureRequestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+            captureRequestBuilder.addTarget(previewSurface!!)
+            captureRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            captureRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            captureRequestBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            
+            try {
+              session.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler)
+              isPreviewActive = true
+              Log.d(TAG, "Camera preview started successfully with texture ID: ${previewTextureEntry!!.id()}")
+            } catch (e: Exception) {
+              Log.e(TAG, "Failed to start preview session", e)
+            }
+          }
+          
+          override fun onConfigureFailed(session: CameraCaptureSession) {
+            Log.e(TAG, "Failed to configure preview capture session")
+          }
+        },
+        backgroundHandler
+      )
+      
+      previewTextureEntry!!.id().toInt()
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to start camera preview", e)
+      null
+    }
+  }
+
+  private fun stopCameraPreview() {
+    try {
+      Log.d(TAG, "Stopping camera preview")
+      
+      isPreviewActive = false
+      
+      // Stop preview capture session
+      previewCaptureSession?.stopRepeating()
+      previewCaptureSession?.close()
+      previewCaptureSession = null
+      
+      // Release preview surfaces
+      previewSurface?.release()
+      previewSurface = null
+      previewSurfaceTexture?.release()
+      previewSurfaceTexture = null
+      
+      // Release texture entry
+      previewTextureEntry?.release()
+      previewTextureEntry = null
+      
+      Log.d(TAG, "Camera preview stopped successfully")
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to stop camera preview", e)
+    }
+  }
+
+  private fun startPreviewWithWatermark(watermarkPath: String, direction: String): Int? {
+    try {
+      Log.d(TAG, "Starting preview with watermark: $watermarkPath, direction: $direction")
+      
+      // Set watermark
+      setWatermarkImage(watermarkPath)
+      
+      // Start regular preview (watermark will be handled by the UI layer)
+      return startCameraPreview(direction)
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to start preview with watermark", e)
+      return null
+    }
+  }
+
+  private fun pauseRecording(): Boolean {
+    return try {
+      if (!isRecording) {
+        Log.w(TAG, "Cannot pause: not recording")
+        return false
+      }
+      
+      // For now, just stop recording since MediaRecorder doesn't support pause/resume easily
+      // In a full implementation, you'd need to handle pause/resume more carefully
+      Log.d(TAG, "Pausing recording (stopping for now)")
+      stopVideoRecording()
+      true
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to pause recording", e)
+      false
+    }
+  }
+
+  private fun resumeRecording(): Boolean {
+    return try {
+      if (isRecording) {
+        Log.w(TAG, "Cannot resume: already recording")
+        return false
+      }
+      
+      // Start a new recording
+      Log.d(TAG, "Resuming recording (starting new recording)")
+      startVideoRecording()
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to resume recording", e)
+      false
+    }
+  }
+
+  private fun capturePhotoWithWatermark(): String? {
+    return try {
+      Log.d(TAG, "Capturing photo with watermark")
+      
+      // For now, return null as photo capture is not implemented
+      // This would require implementing photo capture with watermark overlay
+      Log.w(TAG, "Photo capture with watermark not implemented yet")
+      null
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to capture photo with watermark", e)
+      null
+    }
   }
 }
