@@ -191,6 +191,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       // Return texture ID if preview is active or if recording is active (they share the same camera)
       let textureId = isPreviewActive ? previewTextureId : (isRecording ? previewTextureId : nil)
       print("getPreviewTextureId: previewActive=\(isPreviewActive), recording=\(isRecording), textureId=\(textureId ?? -1)")
+      print("getPreviewTextureId: textureRegistry=\(textureRegistry != nil), previewTexture=\(previewTexture != nil)")
       result(textureId)
     case "startPreviewWithWatermark":
       let args = call.arguments as? [String: Any]
@@ -767,6 +768,14 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     // Stop the capture session
     captureSession?.stopRunning()
     
+    // Clean up preview texture
+    if let textureId = previewTextureId, let textureRegistry = textureRegistry {
+      textureRegistry.unregisterTexture(textureId)
+    }
+    previewTexture = nil
+    previewTextureId = nil
+    isPreviewActive = false
+    
     captureSession = nil
     videoInput = nil
     videoOutput = nil
@@ -837,6 +846,18 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     // Reset frame counters
     videoFrameCount = 0
     audioSampleCount = 0
+    
+    // Create preview texture if not already created (similar to Android implementation)
+    if !isPreviewActive {
+      print("Creating preview texture for recording")
+      if let textureId = createPreviewTexture() {
+        print("Created preview texture with ID: \(textureId) for recording")
+      } else {
+        print("Failed to create preview texture for recording")
+      }
+    } else {
+      print("Preview texture already active, skipping creation")
+    }
     
     // Start recording by setting delegates
     videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue.global(qos: .userInitiated))
@@ -1520,8 +1541,11 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       return nil
     }
     
+    print("Creating CameraPreviewTexture...")
     let previewTexture = CameraPreviewTexture()
+    print("Registering texture with registry...")
     let textureId = textureRegistry.register(previewTexture)
+    print("Texture registered with ID: \(textureId)")
     
     // Store references
     self.previewTexture = previewTexture
