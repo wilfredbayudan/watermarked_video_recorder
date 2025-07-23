@@ -24,7 +24,8 @@ class WatermarkRenderer(
     private val outputSurface: Surface,
     private val watermarkImagePath: String?,
     private val deviceOrientation: Int = 0, // Pass device orientation from plugin
-    private val isFrontCamera: Boolean = false // Pass camera type for proper positioning
+    private val isFrontCamera: Boolean = false, // Pass camera type for proper positioning
+    private val onFrameRendered: ((ByteArray, Int, Int) -> Unit)? = null // Callback for frame caching
 ) : SurfaceTexture.OnFrameAvailableListener {
     companion object {
         private const val TAG = "WatermarkRenderer"
@@ -304,10 +305,14 @@ class WatermarkRenderer(
             }
             
             return cameraSurface
-        } catch (e: InterruptedException) {
-            Log.e(TAG, "Interrupted while waiting for WatermarkRenderer initialization", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting input surface", e)
             return null
         }
+    }
+
+    fun getRenderHandler(): android.os.Handler? {
+        return renderHandler
     }
 
     private fun setupEGL() {
@@ -537,6 +542,63 @@ class WatermarkRenderer(
         } catch (e: Exception) {
             Log.e(TAG, "Error in drawQuad", e)
         }
+    }
+
+    fun captureCurrentFrame(): Bitmap? {
+        return try {
+            Log.d(TAG, "Capturing current frame from OpenGL framebuffer")
+            
+            if (!isRunning || eglDisplay == null || eglSurface == null) {
+                Log.e(TAG, "WatermarkRenderer not running or EGL not initialized")
+                return null
+            }
+            
+            // Make sure we're on the render thread
+            if (Thread.currentThread() != renderThread) {
+                Log.e(TAG, "captureCurrentFrame must be called from render thread")
+                return null
+            }
+            
+            // Create a bitmap to hold the pixel data
+            val width = 1920
+            val height = 1080
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            
+            // Create a buffer to hold the pixel data
+            val buffer = ByteBuffer.allocateDirect(width * height * 4)
+            buffer.order(ByteOrder.nativeOrder())
+            
+            // Read pixels from the framebuffer
+            GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer)
+            
+            // Check for OpenGL errors
+            val error = GLES20.glGetError()
+            if (error != GLES20.GL_NO_ERROR) {
+                Log.e(TAG, "OpenGL error during pixel read: $error")
+                bitmap.recycle()
+                return null
+            }
+            
+            // Convert the buffer to bitmap
+            buffer.rewind()
+            bitmap.copyPixelsFromBuffer(buffer)
+            
+            // Flip the bitmap vertically (OpenGL coordinates are flipped)
+            val flippedBitmap = flipBitmapVertically(bitmap)
+            bitmap.recycle()
+            
+            Log.d(TAG, "Frame capture successful: ${width}x${height}")
+            flippedBitmap
+        } catch (e: Exception) {
+            Log.e(TAG, "Error capturing current frame", e)
+            null
+        }
+    }
+    
+    private fun flipBitmapVertically(bitmap: Bitmap): Bitmap {
+        val matrix = android.graphics.Matrix()
+        matrix.postScale(1f, -1f) // Flip vertically
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
     private fun loadShader(type: Int, shaderCode: String): Int {
