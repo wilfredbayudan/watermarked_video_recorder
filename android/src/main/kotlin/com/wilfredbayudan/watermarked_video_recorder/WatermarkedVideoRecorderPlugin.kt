@@ -452,7 +452,7 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       // Stop background thread
       stopBackgroundThread()
       
-      // Stop and clean up WatermarkRenderer
+      // Clean up WatermarkRenderer (not used in current implementation)
       watermarkRenderer?.stop()
       watermarkRenderer = null
       
@@ -501,7 +501,7 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       currentVideoPath = videoFile.absolutePath
       Log.d(TAG, "Video file created: ${videoFile.absolutePath}")
 
-      // Initialize MediaRecorder (output surface will be set up by WatermarkRenderer)
+      // Initialize MediaRecorder
       mediaRecorder = MediaRecorder().apply {
         Log.d(TAG, "Setting up MediaRecorder...")
         setAudioSource(MediaRecorder.AudioSource.MIC)
@@ -528,50 +528,65 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         }
       }
 
-      // Set up WatermarkRenderer
-      val deviceRotation = getDeviceRotation() // Get actual device rotation
-      val isFront = isFrontCamera() // Determine if current camera is front-facing
-      watermarkRenderer = WatermarkRenderer(
-        context = context,
-        outputSurface = mediaRecorder!!.surface,
-        watermarkImagePath = watermarkImagePath,
-        deviceOrientation = deviceRotation, // Pass actual device rotation for watermark positioning
-        isFrontCamera = isFront // Pass camera type for proper watermark positioning
-      )
-      watermarkRenderer?.start()
-      val rendererInputSurface = watermarkRenderer?.getInputSurface()
-      if (rendererInputSurface == null) {
-        Log.e(TAG, "Failed to get WatermarkRenderer input surface")
-        return false
+      // For now, record without watermark to avoid EGL conflicts
+      // TODO: Implement watermark rendering without EGL conflicts
+      // The WatermarkRenderer causes EGL context conflicts with the camera preview
+      // Need to implement a different approach for watermark rendering
+      Log.d(TAG, "Recording without watermark for now to avoid EGL conflicts")
+      
+      // Create preview surface if texture registry is available
+      if (textureRegistry != null && previewSurface == null) {
+        Log.d(TAG, "Creating preview surface for recording session")
+        previewTextureEntry = textureRegistry!!.createSurfaceTexture()
+        previewSurfaceTexture = previewTextureEntry!!.surfaceTexture()
+        previewSurfaceTexture?.setDefaultBufferSize(1920, 1080)
+        previewSurface = Surface(previewSurfaceTexture)
+        isPreviewActive = true
       }
-
+      
       // Start MediaRecorder BEFORE creating capture session
       Log.d(TAG, "Starting MediaRecorder before capture session...")
       mediaRecorder!!.start()
       isRecording = true
 
-      // Create capture session with WatermarkRenderer input surface
+      // Create recording capture session with both MediaRecorder and preview surfaces
+      val surfaces = mutableListOf<Surface>()
+      surfaces.add(mediaRecorder!!.surface)
+      
+      // Add preview surface to the session if available
+      if (previewSurface != null) {
+        surfaces.add(previewSurface!!)
+        Log.d(TAG, "Adding preview surface to recording session")
+      }
+      
       cameraDevice!!.createCaptureSession(
-        listOf(rendererInputSurface),
+        surfaces,
         object : CameraCaptureSession.StateCallback() {
           override fun onConfigured(session: CameraCaptureSession) {
-            Log.d(TAG, "Recording capture session configured successfully (with WatermarkRenderer)")
+            Log.d(TAG, "Recording capture session configured successfully (with preview)")
             cameraCaptureSession = session
             val captureRequestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
-            captureRequestBuilder.addTarget(rendererInputSurface)
+            captureRequestBuilder.addTarget(mediaRecorder!!.surface)
+            
+            // Add preview target if available
+            if (previewSurface != null) {
+              captureRequestBuilder.addTarget(previewSurface!!)
+              Log.d(TAG, "Added preview target to recording session")
+            }
+            
             captureRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             captureRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             captureRequestBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
             try {
               Log.d(TAG, "Starting repeating capture request...")
               session.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler)
-              Log.d(TAG, "Video recording started successfully: $currentVideoPath (with WatermarkRenderer)")
+              Log.d(TAG, "Video recording started successfully: $currentVideoPath (with preview)")
             } catch (e: Exception) {
               Log.e(TAG, "Failed to start recording session", e)
             }
           }
           override fun onConfigureFailed(session: CameraCaptureSession) {
-            Log.e(TAG, "Failed to configure recording capture session (with WatermarkRenderer)")
+            Log.e(TAG, "Failed to configure recording capture session (with preview)")
           }
         },
         backgroundHandler
@@ -649,7 +664,7 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         }
       }
 
-      // Stop and clean up WatermarkRenderer
+      // Clean up WatermarkRenderer (not used in current implementation)
       watermarkRenderer?.stop()
       watermarkRenderer = null
 
@@ -1036,6 +1051,43 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       if (textureRegistry == null) {
         Log.e(TAG, "Texture registry is null")
         return null
+      }
+      
+      // If we're already recording, create preview texture and add it to the existing session
+      if (isRecording) {
+        Log.d(TAG, "Already recording, creating preview texture and adding to existing session")
+        // Create a texture entry for preview display
+        previewTextureEntry = textureRegistry!!.createSurfaceTexture()
+        previewSurfaceTexture = previewTextureEntry!!.surfaceTexture()
+        previewSurfaceTexture?.setDefaultBufferSize(1920, 1080)
+        previewSurface = Surface(previewSurfaceTexture)
+        
+        // Add preview surface to existing recording session
+        if (cameraCaptureSession != null && previewSurface != null) {
+          try {
+            val captureRequestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+            captureRequestBuilder.addTarget(mediaRecorder!!.surface)
+            captureRequestBuilder.addTarget(previewSurface!!)
+            captureRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            captureRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            captureRequestBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            
+            cameraCaptureSession!!.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler)
+            isPreviewActive = true
+            Log.d(TAG, "Preview added to existing recording session with texture ID: ${previewTextureEntry!!.id()}")
+            return previewTextureEntry!!.id().toInt()
+          } catch (e: Exception) {
+            Log.e(TAG, "Failed to add preview to existing recording session", e)
+            // Fall back to creating texture without camera feed
+            isPreviewActive = true
+            return previewTextureEntry!!.id().toInt()
+          }
+        } else {
+          // Fall back to creating texture without camera feed
+          isPreviewActive = true
+          Log.d(TAG, "Preview texture created for recording session with texture ID: ${previewTextureEntry!!.id()}")
+          return previewTextureEntry!!.id().toInt()
+        }
       }
       
       // Start background thread if not already started
