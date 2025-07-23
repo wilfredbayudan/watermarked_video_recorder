@@ -307,7 +307,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       if session.canSetSessionPreset(.hd1920x1080) {
         session.sessionPreset = .hd1920x1080
       } else {
-        session.sessionPreset = .high
+      session.sessionPreset = .high
       }
 
       // Find back camera (default)
@@ -499,7 +499,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       if session.canSetSessionPreset(.hd1920x1080) {
         session.sessionPreset = .hd1920x1080
       } else {
-        session.sessionPreset = .high
+      session.sessionPreset = .high
       }
       
       let input = try AVCaptureDeviceInput(device: camera)
@@ -640,7 +640,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       if session.canSetSessionPreset(.hd1920x1080) {
         session.sessionPreset = .hd1920x1080
       } else {
-        session.sessionPreset = .high
+      session.sessionPreset = .high
       }
       
       // Find camera with specified position
@@ -1105,6 +1105,11 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     
     // Render the composite image to the pixel buffer
     let outBuffer = pixelBuffer
+    // Defensive: Only render if session is running
+    if captureSession?.isRunning != true {
+      print("[WARN] Tried to render while session is not running")
+      return false
+    }
     CVPixelBufferLockBaseAddress(outBuffer, [])
     defer { CVPixelBufferUnlockBaseAddress(outBuffer, []) }
     do {
