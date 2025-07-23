@@ -57,7 +57,9 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
   // Video recording components
   private var mediaRecorder: MediaRecorder? = null
   private var isRecording = false
+  private var isPaused = false
   private var currentVideoPath: String? = null
+  private var pausedVideoPath: String? = null
 
   // Camera preview components
   private var previewSurfaceTexture: SurfaceTexture? = null
@@ -101,9 +103,11 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
   private fun resetPluginState() {
     Log.d(TAG, "Resetting plugin state")
     isRecording = false
+    isPaused = false
     isPreviewActive = false
     isCameraInitializing = false
     currentVideoPath = null
+    pausedVideoPath = null
     
     // Clean up any existing resources
     previewTextureEntry?.release()
@@ -186,6 +190,9 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       "isRecording" -> {
         result.success(isRecording)
       }
+      "isPaused" -> {
+        result.success(isPaused)
+      }
       "saveVideoToGallery" -> {
         val videoPath = call.argument<String>("videoPath")
         val success = if (videoPath != null) saveVideoToGallery(videoPath) else false
@@ -205,6 +212,7 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
           "cameraDevice" to (cameraDevice != null),
           "isCameraInitializing" to isCameraInitializing,
           "isRecording" to isRecording,
+          "isPaused" to isPaused,
           "cameraId" to cameraId,
           "textureRegistry" to (textureRegistry != null),
           "isPreviewActive" to isPreviewActive,
@@ -430,7 +438,7 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         return
       }
 
-      // This is just a placeholder - we'll create the real session when recording
+      // This is just a placeholder - we'll create the real session when recording starts
       Log.d(TAG, "Camera capture session placeholder created")
       
     } catch (e: Exception) {
@@ -698,12 +706,28 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
 
   private fun stopVideoRecording(): String? {
     return try {
-      if (!isRecording) {
-        Log.w(TAG, "Not recording")
+      if (!isRecording && !isPaused) {
+        Log.w(TAG, "Not recording and not paused")
         return null
       }
 
       Log.d(TAG, "Stopping video recording")
+
+      // If paused in fallback mode, just return the stored path
+      if (isPaused && !isRecording) {
+        Log.d(TAG, "Already stopped in fallback pause mode")
+        val videoPath = pausedVideoPath
+        isPaused = false
+        pausedVideoPath = null
+        return videoPath
+      }
+
+      // If paused, resume first to ensure proper stop
+      if (isPaused) {
+        Log.d(TAG, "Resuming paused recording before stopping")
+        mediaRecorder?.resume()
+        isPaused = false
+      }
 
       // Stop the capture session first
       cameraCaptureSession?.stopRepeating()
@@ -738,8 +762,10 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       mediaRecorder = null
 
       isRecording = false
+      isPaused = false
       val videoPath = currentVideoPath
       currentVideoPath = null
+      pausedVideoPath = null
 
       // Verify the file was created and has content
       if (videoPath != null) {
@@ -777,7 +803,9 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         mediaRecorder?.release()
         mediaRecorder = null
         isRecording = false
+        isPaused = false
         currentVideoPath = null
+        pausedVideoPath = null
       } catch (cleanupError: Exception) {
         Log.e(TAG, "Error during cleanup", cleanupError)
       }
@@ -1282,11 +1310,43 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         return false
       }
       
-      // For now, just stop recording since MediaRecorder doesn't support pause/resume easily
-      // In a full implementation, you'd need to handle pause/resume more carefully
-      Log.d(TAG, "Pausing recording (stopping for now)")
-      stopVideoRecording()
-      true
+      if (isPaused) {
+        Log.w(TAG, "Already paused")
+        return true
+      }
+      
+      Log.d(TAG, "Pausing recording...")
+      
+      // Check if MediaRecorder pause is supported (API 24+)
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+        // Pause MediaRecorder
+        mediaRecorder?.apply {
+          try {
+            pause()
+            Log.d(TAG, "MediaRecorder paused successfully")
+            isPaused = true
+            pausedVideoPath = currentVideoPath
+            Log.d(TAG, "Recording paused successfully")
+            return true
+          } catch (e: Exception) {
+            Log.e(TAG, "Error pausing MediaRecorder", e)
+          }
+        }
+      }
+      
+      // Fallback for older devices or if pause fails: stop and restart
+      Log.d(TAG, "MediaRecorder pause not supported or failed, using stop/restart fallback")
+      val videoPath = stopVideoRecording()
+      if (videoPath != null) {
+        // Store the path for potential concatenation later
+        pausedVideoPath = videoPath
+        isPaused = true
+        Log.d(TAG, "Recording stopped for pause (fallback mode)")
+        return true
+      } else {
+        Log.e(TAG, "Failed to stop recording for pause")
+        return false
+      }
     } catch (e: Exception) {
       Log.e(TAG, "Failed to pause recording", e)
       false
@@ -1295,14 +1355,40 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
 
   private fun resumeRecording(): Boolean {
     return try {
-      if (isRecording) {
-        Log.w(TAG, "Cannot resume: already recording")
+      if (!isRecording && !isPaused) {
+        Log.w(TAG, "Cannot resume: not recording and not paused")
         return false
       }
       
-      // Start a new recording
-      Log.d(TAG, "Resuming recording (starting new recording)")
-      startVideoRecording()
+      if (!isPaused) {
+        Log.w(TAG, "Not paused, nothing to resume")
+        return true
+      }
+      
+      Log.d(TAG, "Resuming recording...")
+      
+      // Check if MediaRecorder resume is supported (API 24+)
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isRecording) {
+        // Resume MediaRecorder
+        mediaRecorder?.apply {
+          try {
+            resume()
+            Log.d(TAG, "MediaRecorder resumed successfully")
+            isPaused = false
+            pausedVideoPath = null
+            Log.d(TAG, "Recording resumed successfully")
+            return true
+          } catch (e: Exception) {
+            Log.e(TAG, "Error resuming MediaRecorder", e)
+          }
+        }
+      }
+      
+      // Fallback for older devices or if resume fails: start new recording
+      Log.d(TAG, "MediaRecorder resume not supported or failed, starting new recording")
+      isPaused = false
+      pausedVideoPath = null
+      return startVideoRecording()
     } catch (e: Exception) {
       Log.e(TAG, "Failed to resume recording", e)
       false
