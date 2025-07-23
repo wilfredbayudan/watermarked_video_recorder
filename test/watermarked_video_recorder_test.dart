@@ -1,5 +1,4 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:watermarked_video_recorder/src/camera_description.dart';
 import 'package:watermarked_video_recorder/watermarked_video_recorder.dart';
 import 'package:watermarked_video_recorder/watermarked_video_recorder_platform_interface.dart';
 import 'package:watermarked_video_recorder/watermarked_video_recorder_method_channel.dart';
@@ -96,6 +95,54 @@ class MockWatermarkedVideoRecorderPlatform with MockPlatformInterfaceMixin imple
   @override
   Future<bool> isCameraReady() {
     // TODO: implement isCameraReady
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<String?> capturePhotoWithWatermark() {
+    // TODO: implement capturePhotoWithWatermark
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<int?> getPreviewTextureId() {
+    // TODO: implement getPreviewTextureId
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<bool> isPreviewActive() {
+    // TODO: implement isPreviewActive
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<bool> pauseRecording() {
+    // TODO: implement pauseRecording
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<bool> resumeRecording() {
+    // TODO: implement resumeRecording
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<int?> startCameraPreview({CameraLensDirection cameraDirection = CameraLensDirection.back}) {
+    // TODO: implement startCameraPreview
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<int?> startPreviewWithWatermark({required String watermarkPath, CameraLensDirection cameraDirection = CameraLensDirection.back}) {
+    // TODO: implement startPreviewWithWatermark
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<void> stopCameraPreview() {
+    // TODO: implement stopCameraPreview
     throw UnimplementedError();
   }
 }

@@ -119,4 +119,33 @@ abstract class WatermarkedVideoRecorderPlatform extends PlatformInterface {
   Future<String?> stopRecordingAndSaveToGallery() {
     throw UnimplementedError('stopRecordingAndSaveToGallery() has not been implemented.');
   }
+
+  /// Start camera preview and return the texture ID for Flutter widget
+  Future<int?> startCameraPreview({CameraLensDirection cameraDirection = CameraLensDirection.back}) {
+    throw UnimplementedError('startCameraPreview() has not been implemented.');
+  }
+
+  /// Stop camera preview
+  Future<void> stopCameraPreview() {
+    throw UnimplementedError('stopCameraPreview() has not been implemented.');
+  }
+
+  /// Check if camera preview is active
+  Future<bool> isPreviewActive() {
+    throw UnimplementedError('isPreviewActive() has not been implemented.');
+  }
+
+  /// Get the current texture ID for the camera preview
+  Future<int?> getPreviewTextureId() {
+    throw UnimplementedError('getPreviewTextureId() has not been implemented.');
+  }
+
+  /// Start preview with watermark overlay
+  Future<int?> startPreviewWithWatermark({required String watermarkPath, CameraLensDirection cameraDirection = CameraLensDirection.back}) {
+    throw UnimplementedError('startPreviewWithWatermark() has not been implemented.');
+  }
+
+  Future<bool> pauseRecording();
+  Future<bool> resumeRecording();
+  Future<String?> capturePhotoWithWatermark();
 }

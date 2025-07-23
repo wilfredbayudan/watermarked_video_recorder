@@ -147,8 +147,8 @@ class MethodChannelWatermarkedVideoRecorder extends WatermarkedVideoRecorderPlat
       print('startRecordingWithWatermark: Setting watermark image');
       await setWatermarkImage(finalWatermarkPath);
 
-      // Initialize camera
-      print('startRecordingWithWatermark: Initializing camera with direction: ${cameraDirection.name}');
+      // Always ensure camera is initialized with the correct direction for recording
+      print('startRecordingWithWatermark: Ensuring camera is initialized with direction: ${cameraDirection.name}');
       final initSuccess = await initializeCameraWithDirection(cameraDirection);
       if (!initSuccess) {
         print('Failed to initialize camera with direction: ${cameraDirection.name}');
@@ -158,8 +158,8 @@ class MethodChannelWatermarkedVideoRecorder extends WatermarkedVideoRecorderPlat
 
       // Check if camera is ready before starting recording
       print('startRecordingWithWatermark: Checking if camera is ready');
-      final isReady = await isCameraReady();
-      if (!isReady) {
+      final isReadyForRecording = await isCameraReady();
+      if (!isReadyForRecording) {
         print('Camera not ready after initialization, waiting...');
         // Wait a bit more for camera to be ready
         await Future.delayed(const Duration(milliseconds: 500));
@@ -232,5 +232,100 @@ class MethodChannelWatermarkedVideoRecorder extends WatermarkedVideoRecorderPlat
       }
       _currentTempPath = null;
     }
+  }
+
+  @override
+  Future<int?> startCameraPreview({CameraLensDirection cameraDirection = CameraLensDirection.back}) async {
+    try {
+      print('startCameraPreview: Starting preview with direction: ${cameraDirection.name}');
+
+      final result = await methodChannel.invokeMethod<int>('startCameraPreview', {'direction': cameraDirection.name});
+
+      print('startCameraPreview: Received texture ID: $result');
+      return result;
+    } catch (e) {
+      print('Error in startCameraPreview: $e');
+      return null;
+    }
+  }
+
+  @override
+  Future<void> stopCameraPreview() async {
+    try {
+      print('stopCameraPreview: Stopping preview');
+      await methodChannel.invokeMethod<void>('stopCameraPreview');
+      print('stopCameraPreview: Preview stopped successfully');
+    } catch (e) {
+      print('Error in stopCameraPreview: $e');
+    }
+  }
+
+  @override
+  Future<bool> isPreviewActive() async {
+    try {
+      final result = await methodChannel.invokeMethod<bool>('isPreviewActive');
+      return result ?? false;
+    } catch (e) {
+      print('Error in isPreviewActive: $e');
+      return false;
+    }
+  }
+
+  @override
+  Future<int?> getPreviewTextureId() async {
+    try {
+      final result = await methodChannel.invokeMethod<int>('getPreviewTextureId');
+      return result;
+    } catch (e) {
+      print('Error in getPreviewTextureId: $e');
+      return null;
+    }
+  }
+
+  @override
+  Future<int?> startPreviewWithWatermark({required String watermarkPath, CameraLensDirection cameraDirection = CameraLensDirection.back}) async {
+    try {
+      print('startPreviewWithWatermark: Starting preview with watermark');
+
+      // Handle asset copying if needed
+      String finalWatermarkPath = watermarkPath;
+      if (watermarkPath.startsWith('assets/')) {
+        print('startPreviewWithWatermark: Copying asset to temp directory');
+        finalWatermarkPath = await _copyAssetToTemp(watermarkPath);
+        _currentTempPath = finalWatermarkPath; // Track for cleanup
+        print('startPreviewWithWatermark: Asset copied to: $finalWatermarkPath');
+      }
+
+      final result = await methodChannel.invokeMethod<int>('startPreviewWithWatermark', {
+        'watermarkPath': finalWatermarkPath,
+        'direction': cameraDirection.name,
+      });
+
+      print('startPreviewWithWatermark: Received texture ID: $result');
+      return result;
+    } catch (e) {
+      print('Error in startPreviewWithWatermark: $e');
+      // Clean up on error
+      await _cleanupTempFile();
+      return null;
+    }
+  }
+
+  @override
+  Future<bool> pauseRecording() async {
+    final result = await methodChannel.invokeMethod<bool>('pauseRecording');
+    return result ?? false;
+  }
+
+  @override
+  Future<bool> resumeRecording() async {
+    final result = await methodChannel.invokeMethod<bool>('resumeRecording');
+    return result ?? false;
+  }
+
+  @override
+  Future<String?> capturePhotoWithWatermark() async {
+    final result = await methodChannel.invokeMethod<String>('capturePhotoWithWatermark');
+    return result;
   }
 }
