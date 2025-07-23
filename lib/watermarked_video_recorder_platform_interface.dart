@@ -147,4 +147,5 @@ abstract class WatermarkedVideoRecorderPlatform extends PlatformInterface {
 
   Future<bool> pauseRecording();
   Future<bool> resumeRecording();
+  Future<String?> capturePhotoWithWatermark();
 }

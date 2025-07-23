@@ -90,6 +90,12 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   private var segmentPaths: [String] = []
   private var isPaused = false
 
+  // Add property for snapshot frame handler
+  private var snapshotFrameHandler: ((CMSampleBuffer) -> Void)?
+
+  // Add this with other private vars at the top of the class
+  private var latestVideoSampleBuffer: CMSampleBuffer?
+
   public static func register(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterMethodChannel(name: "watermarked_video_recorder", binaryMessenger: registrar.messenger())
     let instance = WatermarkedVideoRecorderPlugin()
@@ -194,6 +200,10 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         startPreviewWithWatermark(watermarkPath: watermarkPath, direction: direction)
       } else { nil }
       result(textureId)
+    case "capturePhotoWithWatermark":
+      capturePhotoWithWatermark { imagePath in
+        result(imagePath)
+      }
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -1275,17 +1285,23 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate & AVCaptureAudioDataOutputSampleBufferDelegate
   
   public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+    // Handle snapshot frame if requested
+    if let handler = snapshotFrameHandler {
+      snapshotFrameHandler = nil
+      handler(sampleBuffer)
+      return
+    }
     // Process video frames for preview even when not recording
     // Only process recording-specific logic when recording
-    
-    // Check media type and handle accordingly
     guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
       print("No format description available")
       return
     }
-    
     let mediaType = CMFormatDescriptionGetMediaType(formatDescription)
-    
+    if mediaType == kCMMediaType_Video {
+      // Cache the latest video frame
+      latestVideoSampleBuffer = sampleBuffer
+    }
     // Debug: Log when we receive frames
     totalFrameCount += 1
     if totalFrameCount % 30 == 0 {
@@ -1605,5 +1621,77 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       }
       self.segmentPaths.removeAll()
     }
+  }
+
+  // MARK: - Capture Photo With Watermark
+  private func capturePhotoWithWatermark(completion: @escaping (String?) -> Void) {
+    // Use the latest cached video frame
+    guard let sampleBuffer = latestVideoSampleBuffer else {
+      print("No video frame available for snapshot")
+      completion(nil)
+      return
+    }
+    let imagePath = saveSampleBufferAsImageWithWatermark(sampleBuffer)
+    completion(imagePath)
+  }
+
+  // Helper to save a sample buffer as an image with watermark
+  private func saveSampleBufferAsImageWithWatermark(_ sampleBuffer: CMSampleBuffer) -> String? {
+    guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
+    let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+    let videoSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
+    // Apply watermark if available
+    let finalImage: CIImage
+    if let watermarkImage = watermarkImage, let ciContext = ciContext {
+      let watermarkSize = calculateWatermarkSize(for: videoSize)
+      let watermarkPos = calculateWatermarkPosition(for: videoSize, watermarkSize: watermarkSize)
+      let originalWatermarkSize = watermarkImage.extent.size
+      let scaleX = watermarkSize.width / originalWatermarkSize.width
+      let scaleY = watermarkSize.height / originalWatermarkSize.height
+      let scaledWatermark = watermarkImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+      let positionedWatermark = scaledWatermark.transformed(by: CGAffineTransform(translationX: watermarkPos.x, y: watermarkPos.y))
+      let compositeFilter = CIFilter(name: "CISourceOverCompositing")
+      compositeFilter?.setValue(ciImage, forKey: kCIInputBackgroundImageKey)
+      compositeFilter?.setValue(positionedWatermark, forKey: kCIInputImageKey)
+      if let outputImage = compositeFilter?.outputImage {
+        finalImage = outputImage
+      } else {
+        finalImage = ciImage
+      }
+    } else {
+      finalImage = ciImage
+    }
+    // Render to UIImage
+    let context = ciContext ?? CIContext()
+    guard let cgImage = context.createCGImage(finalImage, from: finalImage.extent) else { return nil }
+    let uiImage = UIImage(cgImage: cgImage)
+    // Save to temporary file
+    let tempDir = NSTemporaryDirectory()
+    let fileName = "snapshot_\(Int(Date().timeIntervalSince1970)).jpg"
+    let filePath = (tempDir as NSString).appendingPathComponent(fileName)
+    guard let jpegData = uiImage.jpegData(compressionQuality: 0.95) else { return nil }
+    do {
+      try jpegData.write(to: URL(fileURLWithPath: filePath))
+    } catch {
+      print("Failed to write snapshot image: \(error)")
+      return nil
+    }
+    // Save to camera roll
+    PHPhotoLibrary.requestAuthorization { status in
+      if status == .authorized {
+        PHPhotoLibrary.shared().performChanges({
+          PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: URL(fileURLWithPath: filePath))
+        }) { success, error in
+          if success {
+            print("Snapshot image saved to gallery")
+          } else {
+            print("Failed to save snapshot to gallery: \(error?.localizedDescription ?? "Unknown error")")
+          }
+        }
+      } else {
+        print("Photo library access denied for snapshot")
+      }
+    }
+    return filePath
   }
 }

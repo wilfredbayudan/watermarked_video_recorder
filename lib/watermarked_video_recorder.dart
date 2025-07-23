@@ -140,4 +140,9 @@ class WatermarkedVideoRecorder {
   Future<bool> resumeRecording() {
     return WatermarkedVideoRecorderPlatform.instance.resumeRecording();
   }
+
+  /// Capture a still photo from the camera with watermark and save to gallery
+  Future<String?> capturePhotoWithWatermark() {
+    return WatermarkedVideoRecorderPlatform.instance.capturePhotoWithWatermark();
+  }
 }
