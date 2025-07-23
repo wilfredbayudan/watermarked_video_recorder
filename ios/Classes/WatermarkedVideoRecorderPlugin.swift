@@ -303,7 +303,12 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       // Create session
       let session = AVCaptureSession()
       session.beginConfiguration()
-      session.sessionPreset = .high
+      // Set session preset to 1080p if available, else fallback to .high
+      if session.canSetSessionPreset(.hd1920x1080) {
+        session.sessionPreset = .hd1920x1080
+      } else {
+        session.sessionPreset = .high
+      }
 
       // Find back camera (default)
       guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
@@ -490,7 +495,12 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       // Create session
       let session = AVCaptureSession()
       session.beginConfiguration()
-      session.sessionPreset = .high
+      // Set session preset to 1080p if available, else fallback to .high
+      if session.canSetSessionPreset(.hd1920x1080) {
+        session.sessionPreset = .hd1920x1080
+      } else {
+        session.sessionPreset = .high
+      }
       
       let input = try AVCaptureDeviceInput(device: camera)
       if session.canAddInput(input) {
@@ -626,7 +636,12 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       // Create session
       let session = AVCaptureSession()
       session.beginConfiguration()
-      session.sessionPreset = .high
+      // Set session preset to 1080p if available, else fallback to .high
+      if session.canSetSessionPreset(.hd1920x1080) {
+        session.sessionPreset = .hd1920x1080
+      } else {
+        session.sessionPreset = .high
+      }
       
       // Find camera with specified position
       guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
@@ -1089,8 +1104,17 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     }
     
     // Render the composite image to the pixel buffer
-    ciContext.render(outputImage, to: pixelBuffer)
-    
+    let outBuffer = pixelBuffer
+    CVPixelBufferLockBaseAddress(outBuffer, [])
+    defer { CVPixelBufferUnlockBaseAddress(outBuffer, []) }
+    do {
+      try autoreleasepool {
+        ciContext.render(outputImage, to: outBuffer)
+      }
+    } catch {
+      print("[ERROR] ciContext.render failed: \(error)")
+      return false
+    }
     return true
   }
   
@@ -1186,7 +1210,11 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       let videoSettings: [String: Any] = [
         AVVideoCodecKey: AVVideoCodecType.h264,
         AVVideoWidthKey: dimensions.width,
-        AVVideoHeightKey: dimensions.height
+        AVVideoHeightKey: dimensions.height,
+        AVVideoCompressionPropertiesKey: [
+          AVVideoAverageBitRateKey: 12_000_000, // 12 Mbps for high quality
+          AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+        ]
       ]
       videoWriterInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
       videoWriterInput?.expectsMediaDataInRealTime = true
@@ -1669,7 +1697,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     let tempDir = NSTemporaryDirectory()
     let fileName = "snapshot_\(Int(Date().timeIntervalSince1970)).jpg"
     let filePath = (tempDir as NSString).appendingPathComponent(fileName)
-    guard let jpegData = uiImage.jpegData(compressionQuality: 0.95) else { return nil }
+    guard let jpegData = uiImage.jpegData(compressionQuality: 1.0) else { return nil } // Use max quality
     do {
       try jpegData.write(to: URL(fileURLWithPath: filePath))
     } catch {
