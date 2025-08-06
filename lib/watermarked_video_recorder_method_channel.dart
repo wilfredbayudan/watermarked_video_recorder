@@ -328,4 +328,16 @@ class MethodChannelWatermarkedVideoRecorder extends WatermarkedVideoRecorderPlat
     final result = await methodChannel.invokeMethod<String>('capturePhotoWithWatermark');
     return result;
   }
+
+  @override
+  Future<bool> startSimpleVideoRecording(String direction) async {
+    final result = await methodChannel.invokeMethod<bool>('startSimpleVideoRecording', {'direction': direction});
+    return result ?? false;
+  }
+
+  @override
+  Future<String?> stopSimpleVideoRecording() async {
+    final result = await methodChannel.invokeMethod<String>('stopSimpleVideoRecording');
+    return result;
+  }
 }
