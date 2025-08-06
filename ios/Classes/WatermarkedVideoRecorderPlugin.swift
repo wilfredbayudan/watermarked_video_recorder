@@ -95,6 +95,105 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
 
   // Add this with other private vars at the top of the class
   private var latestVideoSampleBuffer: CMSampleBuffer?
+  
+  // Audio engine for mixing background audio with recording
+  private var audioEngine: AVAudioEngine?
+  private var audioPlayerNode: AVAudioPlayerNode?
+  
+  // Simple recording properties (separate from complex watermarked recording)
+  private var simpleRecordingSession: AVCaptureSession?
+  private var simpleVideoInput: AVCaptureDeviceInput?
+  private var simpleAudioInput: AVCaptureDeviceInput?
+  private var simpleMovieOutput: AVCaptureMovieFileOutput?
+  private var simpleVideoPath: String?
+
+  // MARK: - Audio Session Configuration
+  
+  private func configureAudioSessionForBackgroundMusic() {
+    do {
+      let audioSession = AVAudioSession.sharedInstance()
+      
+      // Check if other audio is currently playing
+      let isOtherAudioPlaying = audioSession.isOtherAudioPlaying
+      print("🎵 Other audio playing: \(isOtherAudioPlaying)")
+      
+      // CRITICAL: First try .ambient to allow background music to continue
+      // Then we'll switch to .playAndRecord only when we actually need recording
+      try audioSession.setCategory(.ambient, 
+                                   mode: .default, 
+                                   options: [.mixWithOthers, .allowBluetooth, .allowBluetoothA2DP])
+      
+      // Don't activate yet - let the background audio continue
+      print("🎵 Audio session configured for background music preservation")
+      print("🎵 Category: \(audioSession.category)")
+      print("🎵 Mode: \(audioSession.mode)")
+      print("🎵 Options: \(audioSession.categoryOptions)")
+      print("🎵 Other audio still playing: \(audioSession.isOtherAudioPlaying)")
+    } catch {
+      print("❌ Failed to configure audio session: \(error)")
+    }
+  }
+  
+  private func configureAudioSessionForRecording() {
+    do {
+      let audioSession = AVAudioSession.sharedInstance()
+      
+      print("🎵 Configuring audio session for MIXED recording (microphone + background music)...")
+      print("🎵 Other audio playing before: \(audioSession.isOtherAudioPlaying)")
+      
+      // Use ADVANCED options specifically for background music mixing
+      if #available(iOS 14.5, *) {
+        try audioSession.setCategory(.playAndRecord, 
+                                   options: [.mixWithOthers, .allowAirPlay, .overrideMutedMicrophoneInterruption])
+      } else {
+        try audioSession.setCategory(.playAndRecord, 
+                                   options: [.mixWithOthers, .allowAirPlay])
+      }
+      
+      try audioSession.setMode(.videoRecording)
+      
+      // Try activating without interrupting other audio
+      try audioSession.setActive(true, options: [])
+      
+      print("🎵 ✅ Audio session configured for MIXED recording")
+      print("🎵 Category: \(audioSession.category.rawValue)")
+      print("🎵 Mode: \(audioSession.mode.rawValue)")
+      print("🎵 Options: \(audioSession.categoryOptions.rawValue)")
+      print("🎵 Other audio still playing: \(audioSession.isOtherAudioPlaying)")
+    } catch {
+      print("❌ Failed to configure audio session for recording: \(error)")
+    }
+  }
+  
+  private func addAudioInputForRecording() -> Bool {
+    guard let session = captureSession else {
+      print("❌ No capture session available for adding audio input")
+      return false
+    }
+    
+    do {
+      if let audioDevice = AVCaptureDevice.default(for: .audio) {
+        let audioInput = try AVCaptureDeviceInput(device: audioDevice)
+        if session.canAddInput(audioInput) {
+          session.beginConfiguration()
+          session.addInput(audioInput)
+          self.audioInput = audioInput
+          session.commitConfiguration()
+          print("🎵 Added audio input for recording WITH background music mixing")
+          return true
+        } else {
+          print("❌ Cannot add audio input to session")
+          return false
+        }
+      } else {
+        print("❌ No audio device found")
+        return false
+      }
+    } catch {
+      print("❌ Failed to add audio input: \(error)")
+      return false
+    }
+  }
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterMethodChannel(name: "watermarked_video_recorder", binaryMessenger: registrar.messenger())
@@ -206,6 +305,15 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       capturePhotoWithWatermark { imagePath in
         result(imagePath)
       }
+    case "startSimpleVideoRecording":
+      let args = call.arguments as? [String: Any]
+      let direction = args?["direction"] as? String ?? "back"
+      let success = startSimpleVideoRecording(direction: direction)
+      result(success)
+    case "stopSimpleVideoRecording":
+      stopSimpleVideoRecording { videoPath in
+        result(videoPath)
+      }
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -301,9 +409,35 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     
     isCameraInitializing = true
     
+    // Configure audio session BEFORE creating capture session (StackOverflow approach)
+    do {
+      let audioSession = AVAudioSession.sharedInstance()
+      print("🎵 Other audio playing before StackOverflow config: \(audioSession.isOtherAudioPlaying)")
+      
+      // First deactivate current session
+      try audioSession.setActive(false)
+      
+      // Set category with options that allow background music mixing
+      try audioSession.setCategory(.playAndRecord, options: [.mixWithOthers, .allowBluetooth, .allowBluetoothA2DP, .allowAirPlay])
+      try audioSession.setMode(.videoRecording)
+      try audioSession.setActive(true)
+      
+      print("🎵 ✅ StackOverflow-style audio session configured")
+      print("🎵 Other audio still playing: \(audioSession.isOtherAudioPlaying)")
+    } catch {
+      print("❌ Failed StackOverflow audio session config: \(error)")
+      return false
+    }
+    
     do {
       // Create session
       let session = AVCaptureSession()
+      
+      // CRITICAL: Tell the session NOT to automatically manage audio session
+      // This prevents it from overriding our audio session configuration
+      session.automaticallyConfiguresApplicationAudioSession = false
+      session.usesApplicationAudioSession = true
+      
       session.beginConfiguration()
       // Set session preset to 1080p if available, else fallback to .high
       if session.canSetSessionPreset(.hd1920x1080) {
@@ -331,17 +465,15 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         return false
       }
 
-      // Add audio input for recording
+      // DON'T add audio input yet - we'll add it dynamically when starting recording
+      // This is the StackOverflow approach
       if let audioDevice = AVCaptureDevice.default(for: .audio) {
-        let audioInput = try AVCaptureDeviceInput(device: audioDevice)
-        if session.canAddInput(audioInput) {
-          session.addInput(audioInput)
-          print("Added audio input")
-        } else {
-          print("Cannot add audio input")
-        }
+        self.audioInput = try AVCaptureDeviceInput(device: audioDevice)
+        print("✅ Created audio input (will add it when starting recording)")
       } else {
-        print("No audio device found")
+        print("❌ No audio device found for main recording")
+        isCameraInitializing = false
+        return false
       }
 
       // Add video output for real-time frame processing
@@ -413,6 +545,9 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         DispatchQueue.main.async {
           self.isCameraInitializing = false
           print("Camera initialized successfully and session is running")
+          
+          // Keep .ambient category to preserve background music until we actually start recording
+          print("🎵 Keeping .ambient category to preserve background music")
         }
       }
       
@@ -474,6 +609,9 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     
     isCameraInitializing = true
     
+    // SKIP audio session configuration during camera init to preserve background music
+    print("🎵 Skipping audio session config during camera init - background music preserved")
+    
     do {
       // Find camera by ID
       guard let camera = AVCaptureDevice(uniqueID: cameraId) else {
@@ -513,17 +651,15 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         return false
       }
       
-      // Add audio input for recording
+      // DON'T add audio input yet - we'll add it dynamically when starting recording
+      // This is the StackOverflow approach  
       if let audioDevice = AVCaptureDevice.default(for: .audio) {
-        let audioInput = try AVCaptureDeviceInput(device: audioDevice)
-        if session.canAddInput(audioInput) {
-          session.addInput(audioInput)
-          print("Added audio input")
-        } else {
-          print("Cannot add audio input")
-        }
+        self.audioInput = try AVCaptureDeviceInput(device: audioDevice)
+        print("✅ Created audio input (will add it when starting recording)")
       } else {
-        print("No audio device found")
+        print("❌ No audio device found for direction recording")
+        isCameraInitializing = false
+        return false
       }
       
       // Add video output for real-time frame processing
@@ -595,6 +731,9 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         DispatchQueue.main.async {
           self.isCameraInitializing = false
           print("Camera initialized successfully with ID: \(cameraId) and session is running")
+          
+          // Keep .ambient category to preserve background music until we actually start recording
+          print("🎵 Keeping .ambient category to preserve background music")
         }
       }
       
@@ -634,9 +773,36 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     // Store the camera position for orientation calculations
     currentCameraPosition = position
     
+    // Configure audio session BEFORE creating capture session (StackOverflow approach)
+    do {
+      let audioSession = AVAudioSession.sharedInstance()
+      print("🎵 Other audio playing before StackOverflow config: \(audioSession.isOtherAudioPlaying)")
+      
+      // First deactivate current session
+      try audioSession.setActive(false)
+      
+      // Set category with options that allow background music mixing
+      try audioSession.setCategory(.playAndRecord, options: [.mixWithOthers, .allowBluetooth, .allowBluetoothA2DP, .allowAirPlay])
+      try audioSession.setMode(.videoRecording)
+      try audioSession.setActive(true)
+      
+      print("🎵 ✅ StackOverflow-style audio session configured")
+      print("🎵 Other audio still playing: \(audioSession.isOtherAudioPlaying)")
+    } catch {
+      print("❌ Failed StackOverflow audio session config: \(error)")
+      isCameraInitializing = false
+      return false
+    }
+    
     do {
       // Create session
       let session = AVCaptureSession()
+      
+      // CRITICAL: Tell the session NOT to automatically manage audio session
+      // This prevents it from overriding our audio session configuration
+      session.automaticallyConfiguresApplicationAudioSession = false
+      session.usesApplicationAudioSession = true
+      
       session.beginConfiguration()
       // Set session preset to 1080p if available, else fallback to .high
       if session.canSetSessionPreset(.hd1920x1080) {
@@ -661,17 +827,15 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         return false
       }
       
-      // Add audio input for recording
+      // DON'T add audio input yet - we'll add it dynamically when starting recording
+      // This is the StackOverflow approach  
       if let audioDevice = AVCaptureDevice.default(for: .audio) {
-        let audioInput = try AVCaptureDeviceInput(device: audioDevice)
-        if session.canAddInput(audioInput) {
-          session.addInput(audioInput)
-          print("Added audio input")
-        } else {
-          print("Cannot add audio input")
-        }
+        self.audioInput = try AVCaptureDeviceInput(device: audioDevice)
+        print("✅ Created audio input (will add it when starting recording)")
       } else {
-        print("No audio device found")
+        print("❌ No audio device found for direction recording")
+        isCameraInitializing = false
+        return false
       }
       
       // Add video output for real-time frame processing
@@ -743,6 +907,9 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         DispatchQueue.main.async {
           self.isCameraInitializing = false
           print("Camera initialized successfully with direction: \(direction) and session is running")
+          
+          // Keep .ambient category to preserve background music until we actually start recording
+          print("🎵 Keeping .ambient category to preserve background music")
         }
       }
       
@@ -764,6 +931,15 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       videoOutput?.setSampleBufferDelegate(nil, queue: nil)
       audioOutput?.setSampleBufferDelegate(nil, queue: nil)
       isRecording = false
+    }
+    
+    // Clean up audio session to allow other apps to resume
+    do {
+      let audioSession = AVAudioSession.sharedInstance()
+      try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+      print("🎵 Audio session deactivated, notified other apps to resume")
+    } catch {
+      print("❌ Failed to deactivate audio session: \(error)")
     }
     
     // Stop the capture session
@@ -860,9 +1036,23 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       print("Preview texture already active, skipping creation")
     }
     
-    // Start recording by setting delegates
+    // Start video recording first
     videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue.global(qos: .userInitiated))
-    audioOutput?.setSampleBufferDelegate(self, queue: DispatchQueue.global(qos: .userInitiated))
+    
+    // Add audio input dynamically RIGHT before recording (StackOverflow approach)
+    session.beginConfiguration()
+    if let audioInput = self.audioInput, session.canAddInput(audioInput) {
+      session.addInput(audioInput)
+      print("✅ Added audio input dynamically for watermarked recording")
+      
+      // Start audio recording immediately
+      audioOutput?.setSampleBufferDelegate(self, queue: DispatchQueue.global(qos: .userInitiated))
+      print("🎵 Audio recording started with watermarked video")
+    } else {
+      print("❌ Cannot add audio input dynamically for watermarked recording")
+      // Continue without audio - this allows video-only recording
+    }
+    session.commitConfiguration()
     
     isRecording = true
     hasStartedSession = false // Reset session flag
@@ -896,6 +1086,15 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     currentVideoPath = nil
     pendingVideoURL = nil
     isSettingUpWriter = false
+    
+    // Clean up audio session to allow other apps to resume
+    do {
+      let audioSession = AVAudioSession.sharedInstance()
+      try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+      print("🎵 Audio session deactivated after recording stop, notified other apps to resume")
+    } catch {
+      print("❌ Failed to deactivate audio session after recording: \(error)")
+    }
     // Finish writing the file
     if let videoWriter = videoWriter {
       videoWriterInput?.markAsFinished()
@@ -1043,7 +1242,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     let originalWatermarkSize = watermarkImage.extent.size
     let watermarkHeight = watermarkWidth * (originalWatermarkSize.height / originalWatermarkSize.width)
     
-    print("Watermark size calculated: \(watermarkWidth)x\(watermarkHeight) for video size: \(videoSize.width)x\(videoSize.height)")
+    // Watermark size calculated: \(watermarkWidth)x\(watermarkHeight) for video size: \(videoSize.width)x\(videoSize.height) - removed to reduce log spam
     return CGSize(width: watermarkWidth, height: watermarkHeight)
   }
   
@@ -1057,7 +1256,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     x = videoSize.width - watermarkSize.width - margin
     y = margin
     
-    print("Watermark position: bottom-right at \(x),\(y)")
+    // Watermark position: bottom-right at \(x),\(y) - removed to reduce log spam
     return CGPoint(x: x, y: y)
   }
   
@@ -1100,17 +1299,17 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     let scaleY = watermarkSize.height / originalWatermarkSize.height
     var scaledWatermark = watermarkImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
     
-    print("Watermark scaling: original=\(originalWatermarkSize), target=\(watermarkSize), scale=\(scaleX)x\(scaleY)")
+    // Watermark scaling: original=\(originalWatermarkSize), target=\(watermarkSize), scale=\(scaleX)x\(scaleY) - removed to reduce log spam
     
     // Apply correct rotation and flip for each camera type
     let isFrontCamera = currentCameraPosition == .front
     
-    print("Applying watermark transformations: front=\(isFrontCamera)")
+    // Applying watermark transformations: front=\(isFrontCamera) - removed to reduce log spam
     
     // Since we're now using connection.videoOrientation = .portrait,
     // the video frames are already in portrait orientation
     // No mirroring needed for recording - recordings should never be mirrored
-    print("No watermark transforms needed - connection handles video orientation")
+    // No watermark transforms needed - connection handles video orientation - removed to reduce log spam
     
     // Position watermark
     let positionedWatermark = scaledWatermark.transformed(by: CGAffineTransform(translationX: watermarkPos.x, y: watermarkPos.y))
@@ -1262,7 +1461,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         isSettingUpWriter = false
         return
       }
-      // Configure audio writer input
+      // Configure audio writer input for mixed audio (microphone + background music)
       let audioSettings: [String: Any] = [
         AVFormatIDKey: kAudioFormatMPEG4AAC,
         AVSampleRateKey: 44100,
@@ -1273,7 +1472,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       audioWriterInput?.expectsMediaDataInRealTime = true
       if let audioWriterInput = audioWriterInput, videoWriter!.canAdd(audioWriterInput) {
         videoWriter!.add(audioWriterInput)
-        print("setupAVAssetWriter: Added audio writer input successfully")
+        print("setupAVAssetWriter: Added audio writer input for mixed recording")
       } else {
         print("setupAVAssetWriter: Cannot add audio writer input")
         isSettingUpWriter = false
@@ -1404,11 +1603,11 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
         } else {
           processedPixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
         }
-        // Log pixel buffer format
-        if let pb = processedPixelBuffer {
-          let pixelFormat = CVPixelBufferGetPixelFormatType(pb)
-          print("[DEBUG] Pixel buffer format: \(pixelFormat)")
-        }
+        // Log pixel buffer format - removed to reduce log spam
+        // if let pb = processedPixelBuffer {
+        //   let pixelFormat = CVPixelBufferGetPixelFormatType(pb)
+        //   print("[DEBUG] Pixel buffer format: \(pixelFormat)")
+        // }
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let success = pixelBufferAdaptor?.append(processedPixelBuffer!, withPresentationTime: presentationTime) ?? false
         if !success {
@@ -1429,6 +1628,8 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
             print("  - Writer status: \(writer.status.rawValue)")
             print("  - Writer error: \(writer.error?.localizedDescription ?? "none")")
           }
+        } else if audioSampleCount % 100 == 0 {
+          print("🎵 Recording mixed audio frame #\(audioSampleCount) (microphone + background music)")
         }
       }
     }
@@ -1751,5 +1952,171 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       }
     }
     return filePath
+  }
+  
+  // MARK: - Simple Video Recording (No Watermarks, No Complex Audio Session Management)
+  
+  private func startSimpleVideoRecording(direction: String) -> Bool {
+    print("🎬 Starting SIMPLE video recording with direction: \(direction)")
+    
+    // Don't touch existing sessions if they're running
+    if simpleRecordingSession?.isRunning == true {
+      print("❌ Simple recording session already running")
+      return false
+    }
+    
+    // Configure audio session BEFORE creating capture session (StackOverflow approach)
+    do {
+      let audioSession = AVAudioSession.sharedInstance()
+      print("🎵 Other audio playing before StackOverflow config: \(audioSession.isOtherAudioPlaying)")
+      
+      // First deactivate current session
+      try audioSession.setActive(false)
+      
+      // Set category with options that allow background music mixing
+      try audioSession.setCategory(.playAndRecord, options: [.mixWithOthers, .allowBluetooth, .allowBluetoothA2DP, .allowAirPlay])
+      try audioSession.setMode(.videoRecording)
+      try audioSession.setActive(true)
+      
+      print("🎵 ✅ StackOverflow-style audio session configured")
+      print("🎵 Other audio still playing: \(audioSession.isOtherAudioPlaying)")
+    } catch {
+      print("❌ Failed StackOverflow audio session config: \(error)")
+      return false
+    }
+    
+    do {
+      // Create a completely separate, clean capture session
+      let session = AVCaptureSession()
+      
+      // CRITICAL: Tell the session NOT to automatically manage audio session
+      // This prevents it from overriding our audio session configuration
+      session.automaticallyConfiguresApplicationAudioSession = false
+      session.usesApplicationAudioSession = true
+      
+      session.sessionPreset = .high
+      
+      // Determine camera position
+      let position: AVCaptureDevice.Position = direction == "front" ? .front : .back
+      
+      // Add video input
+      guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
+        print("❌ Camera not found for direction: \(direction)")
+        return false
+      }
+      
+      let videoInput = try AVCaptureDeviceInput(device: camera)
+      if session.canAddInput(videoInput) {
+        session.addInput(videoInput)
+        self.simpleVideoInput = videoInput
+        print("✅ Added video input")
+      } else {
+        print("❌ Cannot add video input")
+        return false
+      }
+      
+      // DON'T add audio input yet - we'll add it dynamically when starting recording
+      // This is the StackOverflow approach
+      if let audioDevice = AVCaptureDevice.default(for: .audio) {
+        self.simpleAudioInput = try AVCaptureDeviceInput(device: audioDevice)
+        print("✅ Created audio input (will add it when starting recording)")
+      } else {
+        print("❌ No audio device found")
+        return false
+      }
+      
+      // Add movie file output
+      let movieOutput = AVCaptureMovieFileOutput()
+      if session.canAddOutput(movieOutput) {
+        session.addOutput(movieOutput)
+        self.simpleMovieOutput = movieOutput
+        print("✅ Added movie output")
+      } else {
+        print("❌ Cannot add movie output")
+        return false
+      }
+      
+      // Create output file
+      let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+      let timestamp = Int(Date().timeIntervalSince1970)
+      let fileName = "simple_video_\(timestamp).mov"
+      let videoURL = documentsPath.appendingPathComponent(fileName)
+      
+      self.simpleVideoPath = videoURL.path
+      self.simpleRecordingSession = session
+      
+      // Start session first
+      session.startRunning()
+      
+      // Add audio input dynamically RIGHT before recording (StackOverflow approach)
+      session.beginConfiguration()
+      if let audioInput = self.simpleAudioInput, session.canAddInput(audioInput) {
+        session.addInput(audioInput)
+        print("✅ Added audio input dynamically for recording")
+      } else {
+        print("❌ Cannot add audio input dynamically")
+        return false
+      }
+      session.commitConfiguration()
+      
+      // Now start recording
+      movieOutput.startRecording(to: videoURL, recordingDelegate: self)
+      
+      print("🎬 Simple recording started to: \(videoURL.path)")
+      return true
+      
+    } catch {
+      print("❌ Simple recording setup failed: \(error)")
+      return false
+    }
+  }
+  
+  private func stopSimpleVideoRecording(completion: @escaping (String?) -> Void) {
+    print("🎬 Stopping simple video recording")
+    
+    guard let movieOutput = simpleMovieOutput else {
+      print("❌ No movie output to stop")
+      completion(nil)
+      return
+    }
+    
+    // Stop recording
+    movieOutput.stopRecording()
+    
+    // Clean up audio session to allow other apps to resume
+    do {
+      let audioSession = AVAudioSession.sharedInstance()
+      try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+      print("🎵 Simple recording audio session deactivated, notified other apps to resume")
+    } catch {
+      print("❌ Failed to deactivate audio session after simple recording: \(error)")
+    }
+    
+    // Clean up session
+    simpleRecordingSession?.stopRunning()
+    simpleRecordingSession = nil
+    simpleVideoInput = nil
+    simpleAudioInput = nil
+    simpleMovieOutput = nil
+    
+    // Return the video path
+    completion(simpleVideoPath)
+  }
+}
+
+// MARK: - AVCaptureFileOutputRecordingDelegate for Simple Recording
+
+extension WatermarkedVideoRecorderPlugin: AVCaptureFileOutputRecordingDelegate {
+  public func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
+    if let error = error {
+      print("❌ Simple recording finished with error: \(error)")
+    } else {
+      print("✅ Simple recording finished successfully: \(outputFileURL.path)")
+      
+      // Auto-save to gallery for verification
+      DispatchQueue.main.async {
+        self.saveVideoToGallery(outputFileURL.path)
+      }
+    }
   }
 }

@@ -145,4 +145,14 @@ class WatermarkedVideoRecorder {
   Future<String?> capturePhotoWithWatermark() {
     return WatermarkedVideoRecorderPlatform.instance.capturePhotoWithWatermark();
   }
+
+  /// Start simple video recording without watermarks or complex audio session management
+  Future<bool> startSimpleVideoRecording({String direction = 'back'}) {
+    return WatermarkedVideoRecorderPlatform.instance.startSimpleVideoRecording(direction);
+  }
+
+  /// Stop simple video recording and return the video file path
+  Future<String?> stopSimpleVideoRecording() {
+    return WatermarkedVideoRecorderPlatform.instance.stopSimpleVideoRecording();
+  }
 }

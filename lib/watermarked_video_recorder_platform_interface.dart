@@ -148,4 +148,14 @@ abstract class WatermarkedVideoRecorderPlatform extends PlatformInterface {
   Future<bool> pauseRecording();
   Future<bool> resumeRecording();
   Future<String?> capturePhotoWithWatermark();
+
+  /// Start simple video recording without watermarks
+  Future<bool> startSimpleVideoRecording(String direction) {
+    throw UnimplementedError('startSimpleVideoRecording() has not been implemented.');
+  }
+
+  /// Stop simple video recording
+  Future<String?> stopSimpleVideoRecording() {
+    throw UnimplementedError('stopSimpleVideoRecording() has not been implemented.');
+  }
 }
