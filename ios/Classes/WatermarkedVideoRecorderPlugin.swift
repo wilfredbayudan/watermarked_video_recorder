@@ -933,13 +933,31 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       isRecording = false
     }
     
-    // Clean up audio session to allow other apps to resume
+    // Remove audio input from capture session if it's attached
+    if let session = captureSession, let audioInput = self.audioInput {
+      session.beginConfiguration()
+      if session.inputs.contains(audioInput) {
+        session.removeInput(audioInput)
+        print("✅ Removed audio input from capture session during disposal")
+      }
+      session.commitConfiguration()
+    }
+    
+    // Reset audio session category and deactivate
     do {
       let audioSession = AVAudioSession.sharedInstance()
+      
+      print("🎵 Resetting audio session during disposal...")
+      
+      // Reset to .ambient category to clear any .playAndRecord audio processing
+      try audioSession.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
+      print("🎵 ✅ Category reset to .ambient")
+      
+      // Deactivate and notify other apps
       try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
-      print("🎵 Audio session deactivated, notified other apps to resume")
+      print("🎵 ✅ Audio session deactivated, other apps notified")
     } catch {
-      print("❌ Failed to deactivate audio session: \(error)")
+      print("❌ Failed to reset audio session during disposal: \(error)")
     }
     
     // Stop the capture session
@@ -1087,13 +1105,33 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     pendingVideoURL = nil
     isSettingUpWriter = false
     
-    // Clean up audio session to allow other apps to resume
+    // CRITICAL: Remove audio input from capture session
+    // This allows it to be added cleanly on the next recording
+    if let session = captureSession, let audioInput = self.audioInput {
+      session.beginConfiguration()
+      session.removeInput(audioInput)
+      print("✅ Removed audio input from capture session after recording")
+      session.commitConfiguration()
+    }
+    
+    // CRITICAL: Reset audio session category back to .ambient BEFORE deactivating
+    // This prevents VideoPlayer or other audio from inheriting .playAndRecord settings
     do {
       let audioSession = AVAudioSession.sharedInstance()
+      
+      print("🎵 Resetting audio session after recording...")
+      print("  - Current category: \(audioSession.category.rawValue)")
+      print("  - Current mode: \(audioSession.mode.rawValue)")
+      
+      // First, reset to .ambient category to clear .playAndRecord audio processing
+      try audioSession.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
+      print("🎵 ✅ Category reset to .ambient")
+      
+      // Now deactivate and notify other apps to resume
       try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
-      print("🎵 Audio session deactivated after recording stop, notified other apps to resume")
+      print("🎵 ✅ Audio session deactivated, other apps notified")
     } catch {
-      print("❌ Failed to deactivate audio session after recording: \(error)")
+      print("❌ Failed to reset audio session after recording: \(error)")
     }
     // Finish writing the file
     if let videoWriter = videoWriter {
@@ -2083,13 +2121,31 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     // Stop recording
     movieOutput.stopRecording()
     
-    // Clean up audio session to allow other apps to resume
+    // Remove audio input from simple recording session if attached
+    if let session = simpleRecordingSession, let audioInput = simpleAudioInput {
+      session.beginConfiguration()
+      if session.inputs.contains(audioInput) {
+        session.removeInput(audioInput)
+        print("✅ Removed audio input from simple recording session")
+      }
+      session.commitConfiguration()
+    }
+    
+    // Reset audio session category and deactivate
     do {
       let audioSession = AVAudioSession.sharedInstance()
+      
+      print("🎵 Resetting audio session after simple recording...")
+      
+      // Reset to .ambient category to clear .playAndRecord audio processing
+      try audioSession.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
+      print("🎵 ✅ Category reset to .ambient")
+      
+      // Deactivate and notify other apps
       try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
-      print("🎵 Simple recording audio session deactivated, notified other apps to resume")
+      print("🎵 ✅ Audio session deactivated, other apps notified")
     } catch {
-      print("❌ Failed to deactivate audio session after simple recording: \(error)")
+      print("❌ Failed to reset audio session after simple recording: \(error)")
     }
     
     // Clean up session
