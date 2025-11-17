@@ -69,6 +69,7 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   private var watermarkSize: CGSize = CGSize.zero
   private var watermarkPosition: CGPoint = CGPoint.zero
   private var ciContext: CIContext?
+  private var watermarkMode: String = "bottomRight" // "bottomRight" or "fullScreen"
 
   // Camera initialization tracking
   private var isCameraInitializing = false
@@ -260,7 +261,8 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     case "setWatermarkImage":
       let args = call.arguments as? [String: Any]
       let path = args?["path"] as? String
-      setWatermarkImage(path)
+      let mode = args?["mode"] as? String
+      setWatermarkImage(path, mode: mode)
       result(nil)
     case "isCameraReady":
       let ready = captureSession != nil && captureSession!.isRunning && !isCameraInitializing
@@ -297,8 +299,9 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
       let args = call.arguments as? [String: Any]
       let watermarkPath = args?["watermarkPath"] as? String
       let direction = args?["direction"] as? String
+      let mode = args?["mode"] as? String
       let textureId: Int64? = if let watermarkPath = watermarkPath, let direction = direction {
-        startPreviewWithWatermark(watermarkPath: watermarkPath, direction: direction)
+        startPreviewWithWatermark(watermarkPath: watermarkPath, direction: direction, mode: mode)
       } else { nil }
       result(textureId)
     case "capturePhotoWithWatermark":
@@ -1229,8 +1232,12 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     return true
   }
 
-  private func setWatermarkImage(_ path: String?) {
+  private func setWatermarkImage(_ path: String?, mode: String? = nil) {
     watermarkImagePath = path
+    if let mode = mode {
+      watermarkMode = mode
+      print("Set watermark mode: \(mode)")
+    }
     print("Set watermark image path: \(path ?? "nil")")
     
     // Load watermark image
@@ -1268,34 +1275,44 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   }
   
   private func calculateWatermarkSize(for videoSize: CGSize) -> CGSize {
-    // Use 25% of the video width for the watermark
-    let scale: CGFloat = 0.25
-    let watermarkWidth = videoSize.width * scale
-    
-    // Get the original watermark image dimensions for aspect ratio
-    guard let watermarkImage = watermarkImage else {
-      return CGSize(width: watermarkWidth, height: watermarkWidth)
+    if watermarkMode == "fullScreen" {
+      // Full-screen mode: use entire video dimensions
+      return videoSize
+    } else {
+      // bottomRight mode: Use 25% of the video width for the watermark
+      let scale: CGFloat = 0.25
+      let watermarkWidth = videoSize.width * scale
+      
+      // Get the original watermark image dimensions for aspect ratio
+      guard let watermarkImage = watermarkImage else {
+        return CGSize(width: watermarkWidth, height: watermarkWidth)
+      }
+      
+      let originalWatermarkSize = watermarkImage.extent.size
+      let watermarkHeight = watermarkWidth * (originalWatermarkSize.height / originalWatermarkSize.width)
+      
+      // Watermark size calculated: \(watermarkWidth)x\(watermarkHeight) for video size: \(videoSize.width)x\(videoSize.height) - removed to reduce log spam
+      return CGSize(width: watermarkWidth, height: watermarkHeight)
     }
-    
-    let originalWatermarkSize = watermarkImage.extent.size
-    let watermarkHeight = watermarkWidth * (originalWatermarkSize.height / originalWatermarkSize.width)
-    
-    // Watermark size calculated: \(watermarkWidth)x\(watermarkHeight) for video size: \(videoSize.width)x\(videoSize.height) - removed to reduce log spam
-    return CGSize(width: watermarkWidth, height: watermarkHeight)
   }
   
   private func calculateWatermarkPosition(for videoSize: CGSize, watermarkSize: CGSize) -> CGPoint {
-    // Use a 24px margin from the bottom and right
-    let margin: CGFloat = 24
-    let x: CGFloat
-    let y: CGFloat
-    
-    // For portrait orientation, position in bottom-right
-    x = videoSize.width - watermarkSize.width - margin
-    y = margin
-    
-    // Watermark position: bottom-right at \(x),\(y) - removed to reduce log spam
-    return CGPoint(x: x, y: y)
+    if watermarkMode == "fullScreen" {
+      // Full-screen mode: position at top-left (0, 0)
+      return CGPoint(x: 0, y: 0)
+    } else {
+      // bottomRight mode: Use a 24px margin from the bottom and right
+      let margin: CGFloat = 24
+      let x: CGFloat
+      let y: CGFloat
+      
+      // For portrait orientation, position in bottom-right
+      x = videoSize.width - watermarkSize.width - margin
+      y = margin
+      
+      // Watermark position: bottom-right at \(x),\(y) - removed to reduce log spam
+      return CGPoint(x: x, y: y)
+    }
   }
   
   private func applyWatermarkToExistingFrame(_ sampleBuffer: CMSampleBuffer) -> Bool {
@@ -1346,15 +1363,21 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     
     // Since we're now using connection.videoOrientation = .portrait,
     // the video frames are already in portrait orientation
-    // No mirroring needed for recording - recordings should never be mirrored
-    // No watermark transforms needed - connection handles video orientation - removed to reduce log spam
+    // For fullScreen mode with front camera, mirror for natural WYSIWYG selfie view
+    var finalImage = ciImage
+    if watermarkMode == "fullScreen" && isFrontCamera {
+      // Mirror horizontally by flipping around the Y-axis
+      let flipTransform = CGAffineTransform(scaleX: -1, y: 1)
+      let translatedTransform = flipTransform.translatedBy(x: -videoSize.width, y: 0)
+      finalImage = ciImage.transformed(by: translatedTransform)
+    }
     
     // Position watermark
     let positionedWatermark = scaledWatermark.transformed(by: CGAffineTransform(translationX: watermarkPos.x, y: watermarkPos.y))
     
     // Composite watermark over video frame
     let compositeFilter = CIFilter(name: "CISourceOverCompositing")
-    compositeFilter?.setValue(ciImage, forKey: kCIInputBackgroundImageKey)
+    compositeFilter?.setValue(finalImage, forKey: kCIInputBackgroundImageKey)
     compositeFilter?.setValue(positionedWatermark, forKey: kCIInputImageKey)
     
     guard let outputImage = compositeFilter?.outputImage else {
@@ -1409,12 +1432,21 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     }
     CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
     // Apply watermark to the copy
-    let ciImage = CIImage(cvPixelBuffer: outBuffer)
+    var ciImage = CIImage(cvPixelBuffer: outBuffer)
     guard let watermarkImage = watermarkImage, let ciContext = ciContext else {
       CVPixelBufferUnlockBaseAddress(outBuffer, [])
       return nil
     }
     let videoSize = CGSize(width: width, height: height)
+    
+    // Mirror for fullScreen mode with front camera
+    let isFrontCamera = currentCameraPosition == .front
+    if watermarkMode == "fullScreen" && isFrontCamera {
+      let flipTransform = CGAffineTransform(scaleX: -1, y: 1)
+      let translatedTransform = flipTransform.translatedBy(x: -videoSize.width, y: 0)
+      ciImage = ciImage.transformed(by: translatedTransform)
+    }
+    
     let watermarkSize = calculateWatermarkSize(for: videoSize)
     let watermarkPos = calculateWatermarkPosition(for: videoSize, watermarkSize: watermarkSize)
     let originalWatermarkSize = watermarkImage.extent.size
@@ -1549,12 +1581,21 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     // Apply watermark
     let width = CVPixelBufferGetWidth(outBuffer)
     let height = CVPixelBufferGetHeight(outBuffer)
-    let ciImage = CIImage(cvPixelBuffer: outBuffer)
+    var ciImage = CIImage(cvPixelBuffer: outBuffer)
     guard let watermarkImage = watermarkImage, let ciContext = ciContext else {
       CVPixelBufferUnlockBaseAddress(outBuffer, [])
       return outBuffer
     }
     let videoSize = CGSize(width: width, height: height)
+    
+    // Mirror for fullScreen mode with front camera
+    let isFrontCamera = currentCameraPosition == .front
+    if watermarkMode == "fullScreen" && isFrontCamera {
+      let flipTransform = CGAffineTransform(scaleX: -1, y: 1)
+      let translatedTransform = flipTransform.translatedBy(x: -videoSize.width, y: 0)
+      ciImage = ciImage.transformed(by: translatedTransform)
+    }
+    
     let watermarkSize = calculateWatermarkSize(for: videoSize)
     let watermarkPos = calculateWatermarkPosition(for: videoSize, watermarkSize: watermarkSize)
     let originalWatermarkSize = watermarkImage.extent.size
@@ -1796,11 +1837,11 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     return textureId
   }
 
-  private func startPreviewWithWatermark(watermarkPath: String, direction: String) -> Int64? {
-    print("startPreviewWithWatermark called with watermark: \(watermarkPath), direction: \(direction)")
+  private func startPreviewWithWatermark(watermarkPath: String, direction: String, mode: String? = nil) -> Int64? {
+    print("startPreviewWithWatermark called with watermark: \(watermarkPath), direction: \(direction), mode: \(mode ?? "default")")
     
-    // Set watermark first
-    setWatermarkImage(watermarkPath)
+    // Set watermark first with mode
+    setWatermarkImage(watermarkPath, mode: mode)
     
     // Start preview (this will handle the watermark overlay)
     return startCameraPreview(direction: direction)
@@ -1935,8 +1976,17 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   // Helper to save a sample buffer as an image with watermark
   private func saveSampleBufferAsImageWithWatermark(_ sampleBuffer: CMSampleBuffer) -> String? {
     guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
-    let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+    var ciImage = CIImage(cvPixelBuffer: pixelBuffer)
     let videoSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
+    
+    // Mirror for fullScreen mode with front camera
+    let isFrontCamera = currentCameraPosition == .front
+    if watermarkMode == "fullScreen" && isFrontCamera {
+      let flipTransform = CGAffineTransform(scaleX: -1, y: 1)
+      let translatedTransform = flipTransform.translatedBy(x: -videoSize.width, y: 0)
+      ciImage = ciImage.transformed(by: translatedTransform)
+    }
+    
     // Apply watermark if available
     let finalImage: CIImage
     if let watermarkImage = watermarkImage, let ciContext = ciContext {

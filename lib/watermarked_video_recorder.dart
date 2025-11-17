@@ -80,8 +80,9 @@ class WatermarkedVideoRecorder {
   }
 
   /// Set the watermark image path (asset or file path)
-  Future<void> setWatermarkImage(String path) {
-    return WatermarkedVideoRecorderPlatform.instance.setWatermarkImage(path);
+  /// [mode] can be 'bottomRight' (default) or 'fullScreen'
+  Future<void> setWatermarkImage(String path, {String? mode}) {
+    return WatermarkedVideoRecorderPlatform.instance.setWatermarkImage(path, mode: mode);
   }
 
   /// Check if camera is ready for recording
@@ -127,8 +128,9 @@ class WatermarkedVideoRecorder {
   }
 
   /// Start preview with watermark overlay
-  Future<int?> startPreviewWithWatermark({required String watermarkPath, CameraLensDirection cameraDirection = CameraLensDirection.back}) {
-    return WatermarkedVideoRecorderPlatform.instance.startPreviewWithWatermark(watermarkPath: watermarkPath, cameraDirection: cameraDirection);
+  /// [mode] can be 'bottomRight' (default) or 'fullScreen'
+  Future<int?> startPreviewWithWatermark({required String watermarkPath, CameraLensDirection cameraDirection = CameraLensDirection.back, String? mode}) {
+    return WatermarkedVideoRecorderPlatform.instance.startPreviewWithWatermark(watermarkPath: watermarkPath, cameraDirection: cameraDirection, mode: mode);
   }
 
   /// Pause the current video recording (segment-based)

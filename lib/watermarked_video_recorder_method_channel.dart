@@ -111,8 +111,11 @@ class MethodChannelWatermarkedVideoRecorder extends WatermarkedVideoRecorderPlat
   }
 
   @override
-  Future<void> setWatermarkImage(String path) async {
-    await methodChannel.invokeMethod<void>('setWatermarkImage', {'path': path});
+  Future<void> setWatermarkImage(String path, {String? mode}) async {
+    await methodChannel.invokeMethod<void>('setWatermarkImage', {
+      'path': path,
+      if (mode != null) 'mode': mode,
+    });
   }
 
   @override
@@ -283,9 +286,9 @@ class MethodChannelWatermarkedVideoRecorder extends WatermarkedVideoRecorderPlat
   }
 
   @override
-  Future<int?> startPreviewWithWatermark({required String watermarkPath, CameraLensDirection cameraDirection = CameraLensDirection.back}) async {
+  Future<int?> startPreviewWithWatermark({required String watermarkPath, CameraLensDirection cameraDirection = CameraLensDirection.back, String? mode}) async {
     try {
-      print('startPreviewWithWatermark: Starting preview with watermark');
+      print('startPreviewWithWatermark: Starting preview with watermark (mode: ${mode ?? "default"})');
 
       // Handle asset copying if needed
       String finalWatermarkPath = watermarkPath;
@@ -299,6 +302,7 @@ class MethodChannelWatermarkedVideoRecorder extends WatermarkedVideoRecorderPlat
       final result = await methodChannel.invokeMethod<int>('startPreviewWithWatermark', {
         'watermarkPath': finalWatermarkPath,
         'direction': cameraDirection.name,
+        if (mode != null) 'mode': mode,
       });
 
       print('startPreviewWithWatermark: Received texture ID: $result');
