@@ -214,7 +214,8 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       }
       "setWatermarkImage" -> {
         val path = call.argument<String>("path")
-        setWatermarkImage(path)
+        val mode = call.argument<String>("mode")
+        setWatermarkImage(path, mode)
         result.success(null)
       }
       "isCameraReady" -> {
@@ -255,8 +256,9 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       "startPreviewWithWatermark" -> {
         val watermarkPath = call.argument<String>("watermarkPath")
         val direction = call.argument<String>("direction")
+        val mode = call.argument<String>("mode")
         val textureId = if (watermarkPath != null && direction != null) {
-          startPreviewWithWatermark(watermarkPath, direction)
+          startPreviewWithWatermark(watermarkPath, direction, mode)
         } else {
           startCameraPreview(direction ?: "back")
         }
@@ -612,7 +614,8 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         outputSurface = mediaRecorder!!.surface,
         watermarkImagePath = watermarkImagePath,
         deviceOrientation = deviceRotation,
-        isFrontCamera = isFront
+        isFrontCamera = isFront,
+        watermarkMode = watermarkMode
       )
       watermarkRenderer?.start()
       val rendererInputSurface = watermarkRenderer?.getInputSurface()
@@ -1197,8 +1200,14 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
     }
   }
 
-  private fun setWatermarkImage(path: String?) {
+  private var watermarkMode: String = "bottomRight" // "bottomRight" or "fullScreen"
+  
+  private fun setWatermarkImage(path: String?, mode: String?) {
     watermarkImagePath = path
+    if (mode != null) {
+      watermarkMode = mode
+      Log.d(TAG, "Set watermark mode: $mode")
+    }
     Log.d(TAG, "Set watermark image path: $path")
     // TODO: Implement actual watermark loading and OpenGL pipeline
   }
@@ -1321,12 +1330,12 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
     }
   }
 
-  private fun startPreviewWithWatermark(watermarkPath: String, direction: String): Int? {
+  private fun startPreviewWithWatermark(watermarkPath: String, direction: String, mode: String?): Int? {
     try {
-      Log.d(TAG, "Starting preview with watermark: $watermarkPath, direction: $direction")
+      Log.d(TAG, "Starting preview with watermark: $watermarkPath, direction: $direction, mode: $mode")
       
-      // Set watermark
-      setWatermarkImage(watermarkPath)
+      // Set watermark with mode
+      setWatermarkImage(watermarkPath, mode)
       
       // Start regular preview (watermark will be handled by the UI layer)
       return startCameraPreview(direction)

@@ -25,6 +25,7 @@ class WatermarkRenderer(
     private val watermarkImagePath: String?,
     private val deviceOrientation: Int = 0, // Pass device orientation from plugin
     private val isFrontCamera: Boolean = false, // Pass camera type for proper positioning
+    private val watermarkMode: String = "bottomRight", // "bottomRight" or "fullScreen"
     private val onFrameRendered: ((ByteArray, Int, Int) -> Unit)? = null // Callback for frame caching
 ) : SurfaceTexture.OnFrameAvailableListener {
     companion object {
@@ -79,19 +80,31 @@ class WatermarkRenderer(
         }
     """
 
-    // Fullscreen quad for camera
-    private val fullScreenCoords = floatArrayOf(
-        -1f,  1f, 0f, 0f, 0f,
-        -1f, -1f, 0f, 0f, 1f,
-         1f,  1f, 0f, 1f, 0f,
-         1f, -1f, 0f, 1f, 1f
-    )
-    private val vertexStride = 5 * 4 // 5 floats per vertex, 4 bytes per float
-    private val vertexBuffer: FloatBuffer = ByteBuffer.allocateDirect(fullScreenCoords.size * 4)
-        .order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
-            put(fullScreenCoords)
-            position(0)
+    // Fullscreen quad for camera - texture coordinates are set dynamically based on mode and camera
+    private fun getCameraQuadCoords(): FloatArray {
+        // For fullScreen mode with front camera, mirror horizontally (flip U coordinates)
+        val shouldMirror = watermarkMode == "fullScreen" && isFrontCamera
+        
+        return if (shouldMirror) {
+            // Mirrored texture coordinates (U flipped: 0<->1)
+            floatArrayOf(
+                -1f,  1f, 0f, 1f, 0f,  // top-left (U flipped)
+                -1f, -1f, 0f, 1f, 1f,  // bottom-left (U flipped)
+                 1f,  1f, 0f, 0f, 0f,  // top-right (U flipped)
+                 1f, -1f, 0f, 0f, 1f   // bottom-right (U flipped)
+            )
+        } else {
+            // Normal texture coordinates
+            floatArrayOf(
+                -1f,  1f, 0f, 0f, 0f,  // top-left
+                -1f, -1f, 0f, 0f, 1f,  // bottom-left
+                 1f,  1f, 0f, 1f, 0f,  // top-right
+                 1f, -1f, 0f, 1f, 1f   // bottom-right
+            )
         }
+    }
+    
+    private val vertexStride = 5 * 4 // 5 floats per vertex, 4 bytes per float
 
     // Watermark quad (bottom-right, 25% size) - positioned based on camera type
     private val watermarkCoords = floatArrayOf(
@@ -212,7 +225,13 @@ class WatermarkRenderer(
                 watermarkProgram = createProgram(vertexShaderCode, watermarkFragmentShaderCode)
                 oesTextureHandle = GLES20.glGetUniformLocation(cameraProgram, "sTexture")
                 tex2DHandle = GLES20.glGetUniformLocation(watermarkProgram, "sTexture")
-                Log.d(TAG, "OpenGL renderer started successfully on render thread")
+                
+                // Log mirroring configuration
+                if (watermarkMode == "fullScreen" && isFrontCamera) {
+                    Log.d(TAG, "OpenGL renderer started with MIRRORING (fullScreen mode + front camera)")
+                } else {
+                    Log.d(TAG, "OpenGL renderer started without mirroring (mode: $watermarkMode, frontCamera: $isFrontCamera)")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize OpenGL renderer", e)
                 isRunning = false
@@ -458,9 +477,15 @@ class WatermarkRenderer(
             // Set viewport to match the surface texture size
             GLES20.glViewport(0, 0, 1920, 1080)
             
-            // Always draw camera frame first
+            // Always draw camera frame first (with mirroring if needed)
             GLES20.glUseProgram(cameraProgram)
-            drawQuad(vertexBuffer, cameraTextureId, oes = true)
+            val cameraCoords = getCameraQuadCoords()
+            val cameraBuffer = ByteBuffer.allocateDirect(cameraCoords.size * 4)
+                .order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
+                    put(cameraCoords)
+                    position(0)
+                }
+            drawQuad(cameraBuffer, cameraTextureId, oes = true)
             
             // Draw watermark if available
             if (watermarkTextureId != -1) {

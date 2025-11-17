@@ -510,13 +510,13 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
             print("Set video connection to landscapeLeft")
           }
           
-          // For front camera, also set mirroring
-          if currentCameraPosition == .front {
-            connection.isVideoMirrored = false // No mirroring - handle in Flutter
-            print("Disabled video mirroring for front camera (will handle in Flutter)")
+          // Mirror for fullScreen mode with front camera (WYSIWYG selfie view)
+          if watermarkMode == "fullScreen" && currentCameraPosition == .front {
+            connection.isVideoMirrored = true
+            print("Enabled video mirroring for fullScreen mode + front camera")
           } else {
             connection.isVideoMirrored = false
-            print("Disabled video mirroring for back camera")
+            print("Video mirroring disabled")
           }
         }
       } else {
@@ -696,13 +696,13 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
             print("Set video connection to landscapeLeft")
           }
           
-          // For front camera, also set mirroring
-          if currentCameraPosition == .front {
-            connection.isVideoMirrored = false // No mirroring - handle in Flutter
-            print("Disabled video mirroring for front camera (will handle in Flutter)")
+          // Mirror for fullScreen mode with front camera (WYSIWYG selfie view)
+          if watermarkMode == "fullScreen" && currentCameraPosition == .front {
+            connection.isVideoMirrored = true
+            print("Enabled video mirroring for fullScreen mode + front camera")
           } else {
             connection.isVideoMirrored = false
-            print("Disabled video mirroring for back camera")
+            print("Video mirroring disabled")
           }
         }
       } else {
@@ -872,13 +872,13 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
             print("Set video connection to landscapeLeft")
           }
           
-          // For front camera, also set mirroring
-          if currentCameraPosition == .front {
-            connection.isVideoMirrored = false // No mirroring - handle in Flutter
-            print("Disabled video mirroring for front camera (will handle in Flutter)")
+          // Mirror for fullScreen mode with front camera (WYSIWYG selfie view)
+          if watermarkMode == "fullScreen" && currentCameraPosition == .front {
+            connection.isVideoMirrored = true
+            print("Enabled video mirroring for fullScreen mode + front camera")
           } else {
             connection.isVideoMirrored = false
-            print("Disabled video mirroring for back camera")
+            print("Video mirroring disabled")
           }
         }
       } else {
@@ -1363,21 +1363,14 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     
     // Since we're now using connection.videoOrientation = .portrait,
     // the video frames are already in portrait orientation
-    // For fullScreen mode with front camera, mirror for natural WYSIWYG selfie view
-    var finalImage = ciImage
-    if watermarkMode == "fullScreen" && isFrontCamera {
-      // Mirror horizontally by flipping around the Y-axis
-      let flipTransform = CGAffineTransform(scaleX: -1, y: 1)
-      let translatedTransform = flipTransform.translatedBy(x: -videoSize.width, y: 0)
-      finalImage = ciImage.transformed(by: translatedTransform)
-    }
+    // Mirroring is handled by connection.isVideoMirrored, not manual transforms
     
     // Position watermark
     let positionedWatermark = scaledWatermark.transformed(by: CGAffineTransform(translationX: watermarkPos.x, y: watermarkPos.y))
     
     // Composite watermark over video frame
     let compositeFilter = CIFilter(name: "CISourceOverCompositing")
-    compositeFilter?.setValue(finalImage, forKey: kCIInputBackgroundImageKey)
+    compositeFilter?.setValue(ciImage, forKey: kCIInputBackgroundImageKey)
     compositeFilter?.setValue(positionedWatermark, forKey: kCIInputImageKey)
     
     guard let outputImage = compositeFilter?.outputImage else {
@@ -1432,21 +1425,12 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     }
     CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
     // Apply watermark to the copy
-    var ciImage = CIImage(cvPixelBuffer: outBuffer)
+    let ciImage = CIImage(cvPixelBuffer: outBuffer)
     guard let watermarkImage = watermarkImage, let ciContext = ciContext else {
       CVPixelBufferUnlockBaseAddress(outBuffer, [])
       return nil
     }
     let videoSize = CGSize(width: width, height: height)
-    
-    // Mirror for fullScreen mode with front camera
-    let isFrontCamera = currentCameraPosition == .front
-    if watermarkMode == "fullScreen" && isFrontCamera {
-      let flipTransform = CGAffineTransform(scaleX: -1, y: 1)
-      let translatedTransform = flipTransform.translatedBy(x: -videoSize.width, y: 0)
-      ciImage = ciImage.transformed(by: translatedTransform)
-    }
-    
     let watermarkSize = calculateWatermarkSize(for: videoSize)
     let watermarkPos = calculateWatermarkPosition(for: videoSize, watermarkSize: watermarkSize)
     let originalWatermarkSize = watermarkImage.extent.size
@@ -1581,21 +1565,12 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
     // Apply watermark
     let width = CVPixelBufferGetWidth(outBuffer)
     let height = CVPixelBufferGetHeight(outBuffer)
-    var ciImage = CIImage(cvPixelBuffer: outBuffer)
+    let ciImage = CIImage(cvPixelBuffer: outBuffer)
     guard let watermarkImage = watermarkImage, let ciContext = ciContext else {
       CVPixelBufferUnlockBaseAddress(outBuffer, [])
       return outBuffer
     }
     let videoSize = CGSize(width: width, height: height)
-    
-    // Mirror for fullScreen mode with front camera
-    let isFrontCamera = currentCameraPosition == .front
-    if watermarkMode == "fullScreen" && isFrontCamera {
-      let flipTransform = CGAffineTransform(scaleX: -1, y: 1)
-      let translatedTransform = flipTransform.translatedBy(x: -videoSize.width, y: 0)
-      ciImage = ciImage.transformed(by: translatedTransform)
-    }
-    
     let watermarkSize = calculateWatermarkSize(for: videoSize)
     let watermarkPos = calculateWatermarkPosition(for: videoSize, watermarkSize: watermarkSize)
     let originalWatermarkSize = watermarkImage.extent.size
@@ -1976,17 +1951,8 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
   // Helper to save a sample buffer as an image with watermark
   private func saveSampleBufferAsImageWithWatermark(_ sampleBuffer: CMSampleBuffer) -> String? {
     guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
-    var ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+    let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
     let videoSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
-    
-    // Mirror for fullScreen mode with front camera
-    let isFrontCamera = currentCameraPosition == .front
-    if watermarkMode == "fullScreen" && isFrontCamera {
-      let flipTransform = CGAffineTransform(scaleX: -1, y: 1)
-      let translatedTransform = flipTransform.translatedBy(x: -videoSize.width, y: 0)
-      ciImage = ciImage.transformed(by: translatedTransform)
-    }
-    
     // Apply watermark if available
     let finalImage: CIImage
     if let watermarkImage = watermarkImage, let ciContext = ciContext {
