@@ -40,6 +40,9 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.ImageFormat
+import android.graphics.Rect
+import android.graphics.YuvImage
+import android.media.Image
 import android.media.ImageReader
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.CaptureFailure
@@ -80,6 +83,9 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
 
   // Placeholder for watermark image path
   private var watermarkImagePath: String? = null
+  
+  // Watermark mode: "bottomRight" or "fullScreen"
+  private var watermarkMode: String = "bottomRight"
 
   // Add WatermarkRenderer instance
   private var watermarkRenderer: WatermarkRenderer? = null
@@ -87,6 +93,11 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
   // Photo capture components
   private var imageReader: ImageReader? = null
   private var photoCaptureSession: CameraCaptureSession? = null
+  
+  // Frame caching for photo capture (similar to iOS latestVideoSampleBuffer)
+  @Volatile private var latestCameraFrame: Bitmap? = null
+  private var frameImageReader: ImageReader? = null
+  private val frameLock = Any() // Synchronization lock for frame access
 
   // Permission request tracking
   private var pendingPermissionResult: Result? = null
@@ -214,7 +225,8 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       }
       "setWatermarkImage" -> {
         val path = call.argument<String>("path")
-        setWatermarkImage(path)
+        val mode = call.argument<String>("mode")
+        setWatermarkImage(path, mode)
         result.success(null)
       }
       "isCameraReady" -> {
@@ -255,8 +267,9 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       "startPreviewWithWatermark" -> {
         val watermarkPath = call.argument<String>("watermarkPath")
         val direction = call.argument<String>("direction")
+        val mode = call.argument<String>("mode")
         val textureId = if (watermarkPath != null && direction != null) {
-          startPreviewWithWatermark(watermarkPath, direction)
+          startPreviewWithWatermark(watermarkPath, direction, mode)
         } else {
           startCameraPreview(direction ?: "back")
         }
@@ -612,7 +625,8 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         outputSurface = mediaRecorder!!.surface,
         watermarkImagePath = watermarkImagePath,
         deviceOrientation = deviceRotation,
-        isFrontCamera = isFront
+        isFrontCamera = isFront,
+        watermarkMode = watermarkMode
       )
       watermarkRenderer?.start()
       val rendererInputSurface = watermarkRenderer?.getInputSurface()
@@ -1197,10 +1211,18 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
     }
   }
 
-  private fun setWatermarkImage(path: String?) {
+  private fun setWatermarkImage(path: String?, mode: String?) {
     watermarkImagePath = path
+    // If mode is explicitly provided, use it. Otherwise, reset to default "bottomRight"
+    // This prevents mode from persisting across different recording sessions
+    if (mode != null) {
+      watermarkMode = mode
+      Log.d(TAG, "Set watermark mode: $mode")
+    } else {
+      watermarkMode = "bottomRight"
+      Log.d(TAG, "Mode not specified, defaulting to: bottomRight")
+    }
     Log.d(TAG, "Set watermark image path: $path")
-    // TODO: Implement actual watermark loading and OpenGL pipeline
   }
 
   // Camera Preview Methods
@@ -1257,9 +1279,31 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       previewSurfaceTexture?.setDefaultBufferSize(1920, 1080)
       previewSurface = Surface(previewSurfaceTexture)
       
-      // Create preview capture session
+      // Create ImageReader for frame caching (for photo capture)
+      // Use YUV format for faster, more reliable frame capture
+      frameImageReader = ImageReader.newInstance(1920, 1080, ImageFormat.YUV_420_888, 2)
+      frameImageReader?.setOnImageAvailableListener({ reader ->
+        try {
+          val image = reader.acquireLatestImage()
+          if (image != null) {
+            // Convert YUV Image to Bitmap and cache it
+            val bitmap = yuv420ToBitmap(image)
+            if (bitmap != null) {
+              synchronized(frameLock) {
+                latestCameraFrame?.recycle() // Clean up old frame
+                latestCameraFrame = bitmap
+              }
+            }
+            image.close()
+          }
+        } catch (e: Exception) {
+          Log.e(TAG, "Error caching camera frame", e)
+        }
+      }, backgroundHandler)
+      
+      // Create preview capture session with both preview surface and frame capture
       cameraDevice!!.createCaptureSession(
-        listOf(previewSurface!!),
+        listOf(previewSurface!!, frameImageReader!!.surface),
         object : CameraCaptureSession.StateCallback() {
           override fun onConfigured(session: CameraCaptureSession) {
             Log.d(TAG, "Preview capture session configured successfully")
@@ -1267,6 +1311,7 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
             
             val captureRequestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             captureRequestBuilder.addTarget(previewSurface!!)
+            captureRequestBuilder.addTarget(frameImageReader!!.surface) // Add frame caching target
             captureRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             captureRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             captureRequestBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
@@ -1315,18 +1360,26 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       previewTextureEntry?.release()
       previewTextureEntry = null
       
+      // Clean up frame caching resources
+      frameImageReader?.close()
+      frameImageReader = null
+      synchronized(frameLock) {
+        latestCameraFrame?.recycle()
+        latestCameraFrame = null
+      }
+      
       Log.d(TAG, "Camera preview stopped successfully")
     } catch (e: Exception) {
       Log.e(TAG, "Failed to stop camera preview", e)
     }
   }
 
-  private fun startPreviewWithWatermark(watermarkPath: String, direction: String): Int? {
+  private fun startPreviewWithWatermark(watermarkPath: String, direction: String, mode: String?): Int? {
     try {
-      Log.d(TAG, "Starting preview with watermark: $watermarkPath, direction: $direction")
+      Log.d(TAG, "Starting preview with watermark: $watermarkPath, direction: $direction, mode: $mode")
       
-      // Set watermark
-      setWatermarkImage(watermarkPath)
+      // Set watermark with mode
+      setWatermarkImage(watermarkPath, mode)
       
       // Start regular preview (watermark will be handled by the UI layer)
       return startCameraPreview(direction)
@@ -1442,16 +1495,29 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       val photoPath = photoFile.absolutePath
       Log.d(TAG, "Photo file created: $photoPath")
       
-      // Try to capture from WatermarkRenderer first (if recording)
+      // Try to capture from cached frame first (similar to iOS latestVideoSampleBuffer approach)
       var bitmap: Bitmap? = null
-      if (isRecording && watermarkRenderer != null) {
+      synchronized(frameLock) {
+        if (latestCameraFrame != null && !latestCameraFrame!!.isRecycled) {
+          Log.d(TAG, "Using cached camera frame for photo capture")
+          try {
+            bitmap = latestCameraFrame!!.copy(Bitmap.Config.ARGB_8888, true)
+          } catch (e: Exception) {
+            Log.e(TAG, "Error copying cached frame", e)
+            bitmap = null
+          }
+        }
+      }
+      
+      // If cached frame is not available and we're recording, try WatermarkRenderer
+      if (bitmap == null && isRecording && watermarkRenderer != null) {
         Log.d(TAG, "Attempting to capture from WatermarkRenderer")
         bitmap = captureFromWatermarkRenderer()
       }
       
-      // If WatermarkRenderer capture failed, try preview surface
+      // If still no bitmap, try preview surface as last resort
       if (bitmap == null) {
-        Log.d(TAG, "WatermarkRenderer capture failed, trying preview surface")
+        Log.d(TAG, "Trying preview surface as last resort")
         bitmap = capturePreviewScreenshot()
       }
       
@@ -1460,13 +1526,21 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         return null
       }
       
-      // Apply watermark if available (only when NOT recording, since WatermarkRenderer already applies it)
+      // First, rotate the image 90 degrees to the left (counter-clockwise)
+      val rotatedBitmap = rotateBitmap90DegreesLeft(bitmap)
+      
+      // Then apply watermark if available (only when NOT recording, since WatermarkRenderer already applies it)
+      // Apply watermark AFTER rotation so positioning is correct
       val finalBitmap = if (watermarkImagePath != null && !isRecording) {
-        Log.d(TAG, "Applying watermark to captured photo (not recording)")
-        applyWatermarkToBitmap(bitmap)
+        Log.d(TAG, "Applying watermark to captured photo after rotation (not recording)")
+        val watermarkedBitmap = applyWatermarkToBitmap(rotatedBitmap)
+        if (watermarkedBitmap != rotatedBitmap) {
+          rotatedBitmap.recycle()
+        }
+        watermarkedBitmap
       } else {
-        Log.d(TAG, "Using original photo (recording or no watermark)")
-        bitmap
+        Log.d(TAG, "Using rotated photo without watermark (recording or no watermark)")
+        rotatedBitmap
       }
       
       if (finalBitmap == null) {
@@ -1475,23 +1549,18 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         return null
       }
       
-      // Rotate the image 90 degrees to the left (counter-clockwise)
-      val rotatedBitmap = rotateBitmap90DegreesLeft(finalBitmap)
-      if (rotatedBitmap != finalBitmap) {
-        finalBitmap.recycle()
+      // Clean up original bitmap
+      if (bitmap != rotatedBitmap && bitmap != finalBitmap) {
+        bitmap.recycle()
       }
       
       // Save the photo
       val outputStream = FileOutputStream(photoFile)
-      rotatedBitmap.compress(Bitmap.CompressFormat.JPEG, 100, outputStream)
+      finalBitmap.compress(Bitmap.CompressFormat.JPEG, 100, outputStream)
       outputStream.close()
       
       // Clean up bitmaps
-      rotatedBitmap.recycle()
-      if (finalBitmap != bitmap) {
-        finalBitmap.recycle()
-      }
-      bitmap.recycle()
+      finalBitmap.recycle()
       
       // Check if file was created
       if (photoFile.exists() && photoFile.length() > 0) {
@@ -1829,7 +1898,7 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
 
   private fun applyWatermarkToBitmap(photoBitmap: Bitmap): Bitmap? {
     return try {
-      Log.d(TAG, "Applying watermark to bitmap: ${photoBitmap.width}x${photoBitmap.height}")
+      Log.d(TAG, "Applying watermark to bitmap: ${photoBitmap.width}x${photoBitmap.height}, mode: $watermarkMode")
       
       val watermarkImage = BitmapFactory.decodeFile(watermarkImagePath)
       if (watermarkImage == null) {
@@ -1837,25 +1906,38 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         return photoBitmap
       }
 
-      // Calculate watermark size (25% of photo width)
-      val watermarkWidth = (photoBitmap.width * 0.25).toInt()
-      val watermarkHeight = (watermarkWidth * watermarkImage.height / watermarkImage.width.toFloat()).toInt()
-
-      val scaledWatermark = Bitmap.createScaledBitmap(watermarkImage, watermarkWidth, watermarkHeight, true)
-
       // Create a mutable copy of the photo bitmap
       val mutablePhotoBitmap = photoBitmap.copy(Bitmap.Config.ARGB_8888, true)
       val canvas = Canvas(mutablePhotoBitmap)
 
-      // Position watermark in bottom-right corner with margin
-      val margin = 24
-      val x = photoBitmap.width - watermarkWidth - margin
-      val y = margin
+      if (watermarkMode == "fullScreen") {
+        // Full screen mode: scale watermark to cover entire photo
+        val scaledWatermark = Bitmap.createScaledBitmap(
+          watermarkImage, 
+          photoBitmap.width, 
+          photoBitmap.height, 
+          true
+        )
+        canvas.drawBitmap(scaledWatermark, 0f, 0f, null)
+        scaledWatermark.recycle()
+        Log.d(TAG, "Applied fullScreen watermark")
+      } else {
+        // Bottom-right mode: 25% of photo width
+        val watermarkWidth = (photoBitmap.width * 0.25).toInt()
+        val watermarkHeight = (watermarkWidth * watermarkImage.height / watermarkImage.width.toFloat()).toInt()
+        val scaledWatermark = Bitmap.createScaledBitmap(watermarkImage, watermarkWidth, watermarkHeight, true)
 
-      canvas.drawBitmap(scaledWatermark, x.toFloat(), y.toFloat(), null)
+        // Position watermark in bottom-right corner with margin
+        val margin = 24
+        val x = photoBitmap.width - watermarkWidth - margin
+        val y = photoBitmap.height - watermarkHeight - margin  // FIXED: was 'margin', should be 'height - watermarkHeight - margin'
 
-      // Clean up watermark bitmaps
-      scaledWatermark.recycle()
+        canvas.drawBitmap(scaledWatermark, x.toFloat(), y.toFloat(), null)
+        scaledWatermark.recycle()
+        Log.d(TAG, "Applied bottomRight watermark at ($x, $y)")
+      }
+
+      // Clean up watermark image
       watermarkImage.recycle()
 
       Log.d(TAG, "Watermark applied successfully to bitmap")
@@ -1899,6 +1981,32 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       capturedBitmap
     } catch (e: Exception) {
       Log.e(TAG, "Error capturing from WatermarkRenderer", e)
+      null
+    }
+  }
+
+  private fun yuv420ToBitmap(image: android.media.Image): Bitmap? {
+    return try {
+      val yBuffer = image.planes[0].buffer
+      val uBuffer = image.planes[1].buffer
+      val vBuffer = image.planes[2].buffer
+
+      val ySize = yBuffer.remaining()
+      val uSize = uBuffer.remaining()
+      val vSize = vBuffer.remaining()
+
+      val nv21 = ByteArray(ySize + uSize + vSize)
+      yBuffer.get(nv21, 0, ySize)
+      vBuffer.get(nv21, ySize, vSize)
+      uBuffer.get(nv21, ySize + vSize, uSize)
+
+      val yuvImage = android.graphics.YuvImage(nv21, android.graphics.ImageFormat.NV21, image.width, image.height, null)
+      val out = java.io.ByteArrayOutputStream()
+      yuvImage.compressToJpeg(android.graphics.Rect(0, 0, image.width, image.height), 100, out)
+      val imageBytes = out.toByteArray()
+      BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+    } catch (e: Exception) {
+      Log.e(TAG, "Error converting YUV to Bitmap", e)
       null
     }
   }

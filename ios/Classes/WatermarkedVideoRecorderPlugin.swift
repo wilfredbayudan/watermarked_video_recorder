@@ -1234,9 +1234,14 @@ public class WatermarkedVideoRecorderPlugin: NSObject, FlutterPlugin, AVCaptureV
 
   private func setWatermarkImage(_ path: String?, mode: String? = nil) {
     watermarkImagePath = path
+    // If mode is explicitly provided, use it. Otherwise, reset to default "bottomRight"
+    // This prevents mode from persisting across different recording sessions
     if let mode = mode {
       watermarkMode = mode
       print("Set watermark mode: \(mode)")
+    } else {
+      watermarkMode = "bottomRight"
+      print("Mode not specified, defaulting to: bottomRight")
     }
     print("Set watermark image path: \(path ?? "nil")")
     
