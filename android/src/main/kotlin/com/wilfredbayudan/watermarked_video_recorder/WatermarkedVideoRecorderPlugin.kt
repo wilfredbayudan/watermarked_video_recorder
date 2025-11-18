@@ -80,6 +80,9 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
 
   // Placeholder for watermark image path
   private var watermarkImagePath: String? = null
+  
+  // Watermark mode: "bottomRight" or "fullScreen"
+  private var watermarkMode: String = "bottomRight"
 
   // Add WatermarkRenderer instance
   private var watermarkRenderer: WatermarkRenderer? = null
@@ -87,6 +90,10 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
   // Photo capture components
   private var imageReader: ImageReader? = null
   private var photoCaptureSession: CameraCaptureSession? = null
+  
+  // Frame caching for photo capture (similar to iOS latestVideoSampleBuffer)
+  private var latestCameraFrame: Bitmap? = null
+  private var frameImageReader: ImageReader? = null
 
   // Permission request tracking
   private var pendingPermissionResult: Result? = null
@@ -214,7 +221,8 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       }
       "setWatermarkImage" -> {
         val path = call.argument<String>("path")
-        setWatermarkImage(path)
+        val mode = call.argument<String>("mode")
+        setWatermarkImage(path, mode)
         result.success(null)
       }
       "isCameraReady" -> {
@@ -255,8 +263,9 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       "startPreviewWithWatermark" -> {
         val watermarkPath = call.argument<String>("watermarkPath")
         val direction = call.argument<String>("direction")
+        val mode = call.argument<String>("mode")
         val textureId = if (watermarkPath != null && direction != null) {
-          startPreviewWithWatermark(watermarkPath, direction)
+          startPreviewWithWatermark(watermarkPath, direction, mode)
         } else {
           startCameraPreview(direction ?: "back")
         }
@@ -612,7 +621,8 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
         outputSurface = mediaRecorder!!.surface,
         watermarkImagePath = watermarkImagePath,
         deviceOrientation = deviceRotation,
-        isFrontCamera = isFront
+        isFrontCamera = isFront,
+        watermarkMode = watermarkMode
       )
       watermarkRenderer?.start()
       val rendererInputSurface = watermarkRenderer?.getInputSurface()
@@ -1197,10 +1207,13 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
     }
   }
 
-  private fun setWatermarkImage(path: String?) {
+  private fun setWatermarkImage(path: String?, mode: String?) {
     watermarkImagePath = path
+    if (mode != null) {
+      watermarkMode = mode
+      Log.d(TAG, "Set watermark mode: $mode")
+    }
     Log.d(TAG, "Set watermark image path: $path")
-    // TODO: Implement actual watermark loading and OpenGL pipeline
   }
 
   // Camera Preview Methods
@@ -1257,9 +1270,28 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       previewSurfaceTexture?.setDefaultBufferSize(1920, 1080)
       previewSurface = Surface(previewSurfaceTexture)
       
-      // Create preview capture session
+      // Create ImageReader for frame caching (for photo capture)
+      frameImageReader = ImageReader.newInstance(1920, 1080, ImageFormat.JPEG, 2)
+      frameImageReader?.setOnImageAvailableListener({ reader ->
+        try {
+          val image = reader.acquireLatestImage()
+          if (image != null) {
+            // Convert Image to Bitmap and cache it
+            val buffer = image.planes[0].buffer
+            val bytes = ByteArray(buffer.remaining())
+            buffer.get(bytes)
+            latestCameraFrame?.recycle() // Clean up old frame
+            latestCameraFrame = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            image.close()
+          }
+        } catch (e: Exception) {
+          Log.e(TAG, "Error caching camera frame", e)
+        }
+      }, backgroundHandler)
+      
+      // Create preview capture session with both preview surface and frame capture
       cameraDevice!!.createCaptureSession(
-        listOf(previewSurface!!),
+        listOf(previewSurface!!, frameImageReader!!.surface),
         object : CameraCaptureSession.StateCallback() {
           override fun onConfigured(session: CameraCaptureSession) {
             Log.d(TAG, "Preview capture session configured successfully")
@@ -1267,6 +1299,7 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
             
             val captureRequestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             captureRequestBuilder.addTarget(previewSurface!!)
+            captureRequestBuilder.addTarget(frameImageReader!!.surface) // Add frame caching target
             captureRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             captureRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             captureRequestBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
@@ -1315,18 +1348,24 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       previewTextureEntry?.release()
       previewTextureEntry = null
       
+      // Clean up frame caching resources
+      frameImageReader?.close()
+      frameImageReader = null
+      latestCameraFrame?.recycle()
+      latestCameraFrame = null
+      
       Log.d(TAG, "Camera preview stopped successfully")
     } catch (e: Exception) {
       Log.e(TAG, "Failed to stop camera preview", e)
     }
   }
 
-  private fun startPreviewWithWatermark(watermarkPath: String, direction: String): Int? {
+  private fun startPreviewWithWatermark(watermarkPath: String, direction: String, mode: String?): Int? {
     try {
-      Log.d(TAG, "Starting preview with watermark: $watermarkPath, direction: $direction")
+      Log.d(TAG, "Starting preview with watermark: $watermarkPath, direction: $direction, mode: $mode")
       
-      // Set watermark
-      setWatermarkImage(watermarkPath)
+      // Set watermark with mode
+      setWatermarkImage(watermarkPath, mode)
       
       // Start regular preview (watermark will be handled by the UI layer)
       return startCameraPreview(direction)
@@ -1442,16 +1481,22 @@ class WatermarkedVideoRecorderPlugin: FlutterPlugin, MethodCallHandler, Activity
       val photoPath = photoFile.absolutePath
       Log.d(TAG, "Photo file created: $photoPath")
       
-      // Try to capture from WatermarkRenderer first (if recording)
+      // Try to capture from cached frame first (similar to iOS latestVideoSampleBuffer approach)
       var bitmap: Bitmap? = null
-      if (isRecording && watermarkRenderer != null) {
+      if (latestCameraFrame != null) {
+        Log.d(TAG, "Using cached camera frame for photo capture")
+        bitmap = latestCameraFrame!!.copy(Bitmap.Config.ARGB_8888, true)
+      }
+      
+      // If cached frame is not available and we're recording, try WatermarkRenderer
+      if (bitmap == null && isRecording && watermarkRenderer != null) {
         Log.d(TAG, "Attempting to capture from WatermarkRenderer")
         bitmap = captureFromWatermarkRenderer()
       }
       
-      // If WatermarkRenderer capture failed, try preview surface
+      // If still no bitmap, try preview surface as last resort
       if (bitmap == null) {
-        Log.d(TAG, "WatermarkRenderer capture failed, trying preview surface")
+        Log.d(TAG, "Trying preview surface as last resort")
         bitmap = capturePreviewScreenshot()
       }
       

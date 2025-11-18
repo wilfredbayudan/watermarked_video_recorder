@@ -25,6 +25,7 @@ class WatermarkRenderer(
     private val watermarkImagePath: String?,
     private val deviceOrientation: Int = 0, // Pass device orientation from plugin
     private val isFrontCamera: Boolean = false, // Pass camera type for proper positioning
+    private val watermarkMode: String = "bottomRight", // "bottomRight" or "fullScreen"
     private val onFrameRendered: ((ByteArray, Int, Int) -> Unit)? = null // Callback for frame caching
 ) : SurfaceTexture.OnFrameAvailableListener {
     companion object {
@@ -125,8 +126,25 @@ class WatermarkRenderer(
         return rotated
     }
 
-    // Get watermark coordinates: bottom right, upright, preserve aspect ratio, mirror for front camera, rotate +90°
+    // Get watermark coordinates: supports fullScreen or bottomRight modes
     private fun getWatermarkCoords(): FloatArray {
+        // For fullScreen mode, return coordinates that cover the entire screen
+        if (watermarkMode == "fullScreen") {
+            Log.d(TAG, "Using fullScreen watermark mode")
+            // Full screen quad covering entire NDC space (-1 to 1)
+            // Rotate 270 degrees (90 + 180) to correct upside-down orientation
+            val base = floatArrayOf(
+                1f,  -1f, 0f, 1f, 1f,  // bottom-right
+                -1f, -1f, 0f, 0f, 1f,  // bottom-left
+                1f,   1f, 0f, 1f, 0f,  // top-right
+                -1f,  1f, 0f, 0f, 0f   // top-left
+            )
+            return rotateQuad(base, 270)  // 270 degrees instead of 90 to fix upside-down issue
+        }
+
+        // bottomRight mode: bottom right, upright, preserve aspect ratio, mirror for front camera, rotate +90°
+        Log.d(TAG, "Using bottomRight watermark mode")
+        
         // Output surface size
         val surfaceWidth = outputSurface?.let {
             try {
@@ -147,7 +165,7 @@ class WatermarkRenderer(
         val wmWidth = watermarkBitmap?.width?.toFloat() ?: 200f
         val wmHeight = watermarkBitmap?.height?.toFloat() ?: 100f
 
-        // Watermark width in NDC (35% of video width)
+        // Watermark width in NDC (25% of video width)
         val ndcW = 0.25f * 2f
         // Watermark height in NDC, preserving aspect ratio
         val ndcH = ndcW * (wmHeight / wmWidth) * (surfaceHeight.toFloat() / surfaceWidth.toFloat())
